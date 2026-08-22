@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 - 2026-08-22
+
+- Reworked the PWA into a familiar chat workspace with a conversation sidebar, central message stream and bottom composer.
+- Added a mobile drawer for history, a compact runtime strip, inline approvals and context-aware create/resume/Steer input modes.
+- Removed the metric-card dashboard visual language while preserving all real Codex controls.
+- Rotated the Service Worker cache so deployed clients receive the new shell immediately.
+
 ## 0.2.0 - 2026-08-22
 
 - Added real Codex history from `thread/list`, including CLI, VS Code, app-server and exec sessions.

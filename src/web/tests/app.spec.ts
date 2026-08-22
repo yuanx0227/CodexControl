@@ -205,9 +205,10 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
   await pair(page);
   await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
 
-  await expect(page.getByRole('region', { name: 'Codex 会话控制' })).toBeVisible();
-  await expect(page.getByText('历史测试会话')).toBeVisible();
-  await page.getByRole('button', { name: '新建会话' }).click();
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  const historyButton = page.getByRole('button', { name: /^历史测试会话/u });
+  await expect(historyButton).toBeVisible();
+  await page.getByRole('button', { name: '新建任务' }).click();
   await page.getByLabel('电脑上的项目目录').fill('D:\Projects\NewProject');
   await page.getByLabel('第一条任务').fill('从手机创建真实会话');
   await page.getByRole('button', { name: '创建会话并开始' }).click();
@@ -215,7 +216,8 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
     message.type === 'control.thread.start' && message.payload.text === '从手机创建真实会话',
   )).toBe(true);
 
-  await page.getByRole('button', { name: /历史测试会话/u }).click();
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  await historyButton.click();
   await page.getByLabel('继续历史会话的任务').fill('继续历史任务');
   await page.getByRole('button', { name: '恢复会话并发送' }).click();
   await expect.poll(() => relay.captured.some((message) =>

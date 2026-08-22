@@ -25,7 +25,9 @@ test('real Relay validates browser crypto pairing and routes all controls', asyn
   await expect(page.getByText('等待远程控制')).toBeVisible();
   const approval = page.getByRole('region', { name: '等待审批' });
   await expect(approval).toBeVisible();
+  await page.getByRole('button', { name: '打开会话栏' }).click();
   await expect(page.getByText('系统历史会话')).toBeVisible();
+  await page.getByRole('button', { name: '关闭会话栏' }).first().click();
 
   await page.getByPlaceholder('不要修改数据库结构，只调整业务层。').fill('真实 Relay Steer');
   await page.getByRole('button', { name: '发送 Steer' }).click();
@@ -38,6 +40,7 @@ test('real Relay validates browser crypto pairing and routes all controls', asyn
   await expect(page.getByText('停止请求已接受，等待 Interrupted 终态')).toBeVisible();
   await expect(page.getByText('任务已停止')).toBeVisible();
 
+  await page.getByRole('button', { name: '打开会话栏' }).click();
   await page.getByRole('button', { name: /系统历史会话/u }).click();
   await page.getByLabel('继续历史会话的任务').fill('真实 Relay 恢复历史会话');
   await page.getByRole('button', { name: '恢复会话并发送' }).click();

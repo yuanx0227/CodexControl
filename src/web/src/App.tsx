@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import type { ApprovalRequested, CodexThreadSummary, DeviceSummary } from './protocol';
+import type {
+  ApprovalRequested,
+  CodexEvent,
+  CodexSnapshot,
+  CodexThreadSummary,
+  DeviceSummary,
+} from './protocol';
 import { RelayClient, type RelayClientState } from './relayClient';
 import { loadRelayUrl, saveRelayUrl } from './storage';
 
@@ -44,27 +50,22 @@ export function App() {
   const selected = state.devices.find((device) => device.deviceId === selectedId);
   if (selected) {
     return (
-      <DeviceDetail
+      <DeviceWorkspace
         client={client}
         device={selected}
         events={state.events[selected.deviceId] ?? []}
         approvals={state.approvals[selected.deviceId] ?? []}
+        connection={state.connection}
         onBack={() => setSelectedId(undefined)}
-        onSteer={async (text) => {
-          const snapshot = selected.snapshot;
-          if (!snapshot?.activeThreadId || !snapshot.activeTurnId) throw new Error('当前没有活动 Turn');
-          await client.steer(selected.deviceId, snapshot.activeThreadId, snapshot.activeTurnId, text);
-          showToast('干预已送入当前 Turn');
+        onApprove={async (approvalId, decision) => {
+          await client.approve(selected.deviceId, approvalId, decision);
+          showToast('审批结果已提交');
         }}
         onInterrupt={async () => {
           const snapshot = selected.snapshot;
           if (!snapshot?.activeThreadId || !snapshot.activeTurnId) throw new Error('当前没有活动 Turn');
           await client.interrupt(selected.deviceId, snapshot.activeThreadId, snapshot.activeTurnId);
           showToast('停止请求已接受，等待 Interrupted 终态');
-        }}
-        onApprove={async (approvalId, decision) => {
-          await client.approve(selected.deviceId, approvalId, decision);
-          showToast('审批结果已提交');
         }}
         onRevoke={async () => {
           await client.revoke(selected.deviceId);
@@ -79,8 +80,8 @@ export function App() {
 
   const needsPairing = showPairing || state.devices.length === 0;
   return (
-    <main className="app-shell">
-      <Header connection={state.connection} />
+    <main className="landing-shell">
+      <LandingHeader connection={state.connection} />
       {needsPairing ? (
         <PairingPanel
           connection={state.connection}
@@ -94,19 +95,18 @@ export function App() {
           }}
         />
       ) : (
-        <section className="content" aria-label="设备列表">
-          <div className="section-heading">
+        <section className="device-home" aria-label="设备列表">
+          <div className="device-home-heading">
             <div>
-              <p className="eyebrow">Paired devices</p>
+              <p className="overline">Codex Control</p>
               <h1>开发电脑</h1>
+              <p>选择一台电脑，继续历史会话或开始新任务。</p>
             </div>
-            <button className="secondary-button" onClick={() => setShowPairing(true)}>
-              添加电脑
-            </button>
+            <button className="quiet-button" onClick={() => setShowPairing(true)}>添加电脑</button>
           </div>
-          <div className="device-grid">
+          <div className="device-list">
             {state.devices.map((device) => (
-              <DeviceCard key={device.deviceId} device={device} onOpen={() => setSelectedId(device.deviceId)} />
+              <DeviceRow key={device.deviceId} device={device} onOpen={() => setSelectedId(device.deviceId)} />
             ))}
           </div>
           {toast && <div key={toast} className="toast">{toast}</div>}
@@ -116,17 +116,27 @@ export function App() {
   );
 }
 
-function Header({ connection }: { connection: RelayClientState['connection'] }) {
-  const label = connection === 'connected' ? 'Relay 已连接' : connection === 'connecting' ? '正在连接' : 'Relay 离线';
+function LandingHeader({ connection }: { connection: RelayClientState['connection'] }) {
   return (
-    <header className="topbar">
-      <div className="brand-mark">C</div>
-      <div className="brand-copy">
-        <strong>Codex Control</strong>
-        <span className={`connection ${connection}`}><i />{label}</span>
-      </div>
+    <header className="landing-header">
+      <Brand />
+      <ConnectionState connection={connection} />
     </header>
   );
+}
+
+function Brand() {
+  return (
+    <div className="brand">
+      <span className="brand-glyph">C</span>
+      <strong>Codex Control</strong>
+    </div>
+  );
+}
+
+function ConnectionState({ connection }: { connection: RelayClientState['connection'] }) {
+  const label = connection === 'connected' ? 'Relay 已连接' : connection === 'connecting' ? '正在连接' : 'Relay 离线';
+  return <span className={`connection-state ${connection}`}><i />{label}</span>;
 }
 
 function PairingPanel({
@@ -161,101 +171,109 @@ function PairingPanel({
   }
 
   return (
-    <section className="pairing-card content">
-      <p className="eyebrow">Secure pairing</p>
-      <h1>连接你的电脑</h1>
-      <p className="muted">在电脑上运行 Agent 的 <code>--pair</code>，输入三分钟内有效的六位码。</p>
-      <form onSubmit={submit}>
-        <label htmlFor="pairing-code">六位配对码</label>
-        <input
-          id="pairing-code"
-          className="code-input"
-          inputMode="numeric"
-          autoComplete="one-time-code"
-          maxLength={7}
-          placeholder="583 271"
-          value={formatCode(code)}
-          onChange={(event) => setCode(event.target.value.replaceAll(/\D/gu, '').slice(0, 6))}
-          autoFocus
-        />
-        <button className="primary-button" disabled={code.length !== 6 || submitting || connection === 'offline'}>
-          {submitting ? '正在配对…' : '配对'}
-        </button>
-      </form>
-      <details className="relay-settings">
-        <summary>Relay 设置</summary>
-        <label htmlFor="relay-url">WebSocket 地址</label>
-        <div className="inline-form">
-          <input id="relay-url" value={relayUrl} onChange={(event) => setRelayUrl(event.target.value)} />
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => {
-              saveRelayUrl(relayUrl);
-              window.location.reload();
-            }}
-          >
-            保存并重连
+    <section className="pairing-view">
+      <div className="pairing-panel">
+        <span className="pairing-icon">↔</span>
+        <h1>连接你的电脑</h1>
+        <p>在电脑上运行 Agent 的 <code>--pair</code>，输入三分钟内有效的六位码。</p>
+        <form onSubmit={submit}>
+          <label htmlFor="pairing-code">六位配对码</label>
+          <input
+            id="pairing-code"
+            className="pairing-code"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={7}
+            placeholder="583 271"
+            value={formatCode(code)}
+            onChange={(event) => setCode(event.target.value.replaceAll(/\D/gu, '').slice(0, 6))}
+            autoFocus
+          />
+          <button className="solid-button full-button" disabled={code.length !== 6 || submitting || connection === 'offline'}>
+            {submitting ? '正在配对…' : '配对'}
           </button>
-        </div>
-      </details>
-      {(message || error) && <p role="alert" className="error-message">{message ?? error}</p>}
-      {hasDevices && <button className="text-button" onClick={onCancel}>返回设备列表</button>}
+        </form>
+        <details className="relay-settings">
+          <summary>Relay 设置</summary>
+          <label htmlFor="relay-url">WebSocket 地址</label>
+          <div className="settings-row">
+            <input id="relay-url" value={relayUrl} onChange={(event) => setRelayUrl(event.target.value)} />
+            <button
+              type="button"
+              className="quiet-button"
+              onClick={() => {
+                saveRelayUrl(relayUrl);
+                window.location.reload();
+              }}
+            >
+              保存并重连
+            </button>
+          </div>
+        </details>
+        {(message || error) && <p role="alert" className="inline-error">{message ?? error}</p>}
+        {hasDevices && <button className="link-button" onClick={onCancel}>返回设备列表</button>}
+      </div>
     </section>
   );
 }
 
-function DeviceCard({ device, onOpen }: { device: DeviceSummary; onOpen: () => void }) {
-  const snapshot = device.snapshot;
+function DeviceRow({ device, onOpen }: { device: DeviceSummary; onOpen: () => void }) {
   return (
-    <button className="device-card" onClick={onOpen} aria-label={`打开 ${device.name}`}>
-      <div className="device-card-top">
+    <button className="device-row" onClick={onOpen} aria-label={`打开 ${device.name}`}>
+      <span className="device-avatar">{device.name.slice(0, 1).toUpperCase()}</span>
+      <span className="device-copy">
         <strong>{device.name}</strong>
-        <StatusPill online={device.online} status={snapshot?.status} />
-      </div>
-      <p className="project-path">{snapshot?.currentProject ?? '尚无活动项目'}</p>
-      <p className="activity-line">{snapshot?.currentActivity ?? (device.online ? 'Idle' : 'Offline')}</p>
-      <span className="open-hint">查看详情 →</span>
+        <small>{device.snapshot?.currentProject ?? (device.online ? '尚无活动项目' : '设备离线')}</small>
+      </span>
+      <StatusPill online={device.online} status={device.snapshot?.status} />
+      <span className="row-chevron">›</span>
     </button>
   );
 }
 
-function DeviceDetail({
+interface ChatEntry {
+  id: string;
+  role: 'user' | 'assistant' | 'tool' | 'system';
+  text: string;
+  meta?: string;
+}
+
+function DeviceWorkspace({
   client,
   device,
   events,
   approvals,
+  connection,
   onBack,
-  onSteer,
-  onInterrupt,
   onApprove,
+  onInterrupt,
   onRevoke,
   onNotify,
   toast,
 }: {
   client: RelayClient;
   device: DeviceSummary;
-  events: Array<{ eventId: string; kind: string; occurredAt: number; data: Record<string, unknown> }>;
+  events: CodexEvent[];
   approvals: ApprovalRequested[];
+  connection: RelayClientState['connection'];
   onBack: () => void;
-  onSteer: (text: string) => Promise<void>;
-  onInterrupt: () => Promise<void>;
   onApprove: (approvalId: string, decision: unknown) => Promise<void>;
+  onInterrupt: () => Promise<void>;
   onRevoke: () => Promise<void>;
   onNotify: (message: string) => void;
   toast?: string;
 }) {
-  const [steer, setSteer] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [interrupting, setInterrupting] = useState(false);
   const [threads, setThreads] = useState<CodexThreadSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [selectedThreadId, setSelectedThreadId] = useState<string>();
-  const [resumeText, setResumeText] = useState('');
-  const [showNewSession, setShowNewSession] = useState(false);
+  const [newSession, setNewSession] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [composer, setComposer] = useState('');
   const [newCwd, setNewCwd] = useState(device.snapshot?.currentProject ?? '');
-  const [newText, setNewText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [interrupting, setInterrupting] = useState(false);
+  const [localEntries, setLocalEntries] = useState<ChatEntry[]>([]);
   const snapshot = device.snapshot;
 
   const refreshThreads = useCallback(async () => {
@@ -276,14 +294,74 @@ function DeviceDetail({
   }, [refreshThreads]);
 
   useEffect(() => {
+    if (!snapshot?.activeThreadId) return;
+    setSelectedThreadId(snapshot.activeThreadId);
+    setNewSession(false);
+  }, [snapshot?.activeThreadId]);
+
+  useEffect(() => {
+    if (newSession || selectedThreadId || threads.length === 0) return;
+    setSelectedThreadId(threads[0].threadId);
+  }, [newSession, selectedThreadId, threads]);
+
+  useEffect(() => {
     if (snapshot?.status === 'Interrupted') setInterrupting(false);
   }, [snapshot?.status]);
 
-  async function run(action: () => Promise<void>) {
+  const selectedThread = threads.find((thread) => thread.threadId === selectedThreadId);
+  const hasActiveTurn = Boolean(snapshot?.activeThreadId && snapshot.activeTurnId);
+  const conversationId = snapshot?.activeThreadId ?? selectedThreadId;
+  const eventEntries = useMemo(
+    () => buildChatEntries(events, snapshot, conversationId),
+    [conversationId, events, snapshot],
+  );
+  const chatEntries = [...localEntries, ...eventEntries];
+
+  function selectThread(threadId: string) {
+    setSelectedThreadId(threadId);
+    setNewSession(false);
+    setSidebarOpen(false);
+    setLocalEntries([]);
+    setComposer('');
+    setError(undefined);
+  }
+
+  function beginNewSession() {
+    setSelectedThreadId(undefined);
+    setNewSession(true);
+    setSidebarOpen(false);
+    setLocalEntries([]);
+    setComposer('');
+    setError(undefined);
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const text = composer.trim();
+    if (!text || busy) return;
     setBusy(true);
     setError(undefined);
+    setLocalEntries((entries) => [
+      ...entries,
+      { id: `local_${crypto.randomUUID()}`, role: 'user', text, meta: hasActiveTurn ? 'Steer' : undefined },
+    ]);
+    setComposer('');
     try {
-      await action();
+      if (hasActiveTurn) {
+        await client.steer(device.deviceId, snapshot!.activeThreadId!, snapshot!.activeTurnId!, text);
+        onNotify('干预已送入当前 Turn');
+      } else if (selectedThread) {
+        const action = await client.resumeThread(device.deviceId, selectedThread.threadId, text);
+        setSelectedThreadId(action.threadId);
+        setNewSession(false);
+        onNotify('历史会话已恢复，真实 Turn 已启动');
+      } else {
+        const action = await client.startThread(device.deviceId, newCwd.trim(), text);
+        setSelectedThreadId(action.threadId);
+        setNewSession(false);
+        onNotify('新会话已创建，真实 Turn 已启动');
+      }
+      await refreshThreads();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -291,203 +369,198 @@ function DeviceDetail({
     }
   }
 
-  const selectedThread = threads.find((thread) => thread.threadId === selectedThreadId);
-  const hasActiveTurn = Boolean(snapshot?.activeTurnId);
+  const title = hasActiveTurn
+    ? selectedThread?.name ?? selectedThread?.preview ?? '当前任务'
+    : newSession
+      ? '新任务'
+      : selectedThread?.name ?? selectedThread?.preview ?? 'Codex';
+  const composerLabel = hasActiveTurn
+    ? 'Steer 当前任务'
+    : selectedThread
+      ? '继续历史会话的任务'
+      : '第一条任务';
+  const composerPlaceholder = hasActiveTurn
+    ? '不要修改数据库结构，只调整业务层。'
+    : selectedThread
+      ? '继续这个会话…'
+      : '给电脑上的 Codex 发送任务…';
+  const sendLabel = hasActiveTurn
+    ? '发送 Steer'
+    : selectedThread
+      ? '恢复会话并发送'
+      : '创建会话并开始';
 
   return (
-    <main className="app-shell">
-      <header className="detail-header">
-        <button className="back-button" onClick={onBack}>← 返回</button>
-        <div>
-          <h1>{device.name}</h1>
-          <StatusPill online={device.online} status={interrupting ? 'Interrupting' : snapshot?.status} />
+    <div className={`workspace-shell ${sidebarOpen ? 'sidebar-is-open' : ''}`}>
+      <aside className="conversation-sidebar">
+        <div className="sidebar-top">
+          <button className="icon-button mobile-close" aria-label="关闭会话栏" onClick={() => setSidebarOpen(false)}>×</button>
+          <button className="sidebar-back" onClick={onBack}>‹ 所有电脑</button>
         </div>
-      </header>
-      <section className="content detail-content">
-        <div className="metric-grid">
-          <Metric label="项目" value={snapshot?.currentProject ?? '—'} />
-          <Metric label="当前活动" value={snapshot?.currentActivity ?? '—'} />
-          <Metric label="运行命令" value={snapshot?.runningCommand ?? '—'} />
-          <Metric label="最近消息" value={snapshot?.lastAgentMessage ?? '—'} />
+        <button className="new-chat-button" onClick={beginNewSession}>
+          <span>＋</span> 新建任务
+        </button>
+        <div className="sidebar-label">
+          <span>会话</span>
+          <button className="icon-button" aria-label="刷新历史" disabled={historyLoading} onClick={() => void refreshThreads()}>↻</button>
         </div>
-
-        <section className="session-card" aria-label="Codex 会话控制">
-          <div className="session-heading">
-            <div>
-              <p className="eyebrow">Real app-server sessions</p>
-              <h2>Codex 会话</h2>
-              <p className="muted">历史来自电脑上的 <code>thread/list</code>；创建和恢复会直接启动真实 Turn。</p>
-            </div>
-            <div className="button-row compact-actions">
-              <button
-                className="secondary-button"
-                disabled={historyLoading || !device.online}
-                onClick={() => void refreshThreads()}
-              >
-                {historyLoading ? '加载中…' : '刷新历史'}
-              </button>
-              <button
-                className="primary-button"
-                disabled={!device.online || hasActiveTurn}
-                onClick={() => setShowNewSession((value) => !value)}
-              >
-                新建会话
-              </button>
-            </div>
+        <nav className="conversation-nav" aria-label="历史会话">
+          {historyLoading ? <p className="sidebar-empty">正在读取历史…</p> : threads.length === 0 ? (
+            <p className="sidebar-empty">暂无历史会话</p>
+          ) : threads.map((thread) => (
+            <button
+              key={thread.threadId}
+              className={`conversation-link ${selectedThreadId === thread.threadId && !newSession ? 'active' : ''}`}
+              onClick={() => selectThread(thread.threadId)}
+            >
+              <span>{thread.name ?? thread.preview ?? '未命名会话'}</span>
+              <small>{formatThreadTime(thread.updatedAt ?? thread.createdAt)}</small>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-footer">
+          <div className="sidebar-device">
+            <span className="device-avatar small">{device.name.slice(0, 1).toUpperCase()}</span>
+            <span><strong>{device.name}</strong><small><ConnectionState connection={connection} /></small></span>
           </div>
+          <button className="sidebar-action" onClick={() => void refreshThreads()}>刷新会话</button>
+          <button className="sidebar-action danger" onClick={() => void onRevoke()}>解除配对</button>
+        </div>
+      </aside>
+      <button className="sidebar-backdrop" aria-label="关闭会话栏" onClick={() => setSidebarOpen(false)} />
 
-          {hasActiveTurn && (
-            <p className="session-warning">当前 Turn 正在运行；可在下方 Steer 或停止，结束后再创建/恢复会话。</p>
+      <main className="chat-main">
+        <header className="chat-header">
+          <button className="icon-button menu-button" aria-label="打开会话栏" onClick={() => setSidebarOpen(true)}>☰</button>
+          <div className="chat-title">
+            <strong>{title}</strong>
+            <span>{selectedThread?.cwd ?? snapshot?.currentProject ?? device.name}</span>
+          </div>
+          <StatusPill online={device.online} status={interrupting ? 'Interrupting' : snapshot?.status} />
+          <button
+            className="stop-button"
+            disabled={busy || !hasActiveTurn}
+            onClick={() => {
+              setBusy(true);
+              setError(undefined);
+              void onInterrupt()
+                .then(() => setInterrupting(true))
+                .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+                .finally(() => setBusy(false));
+            }}
+          >
+            停止当前任务
+          </button>
+        </header>
+
+        {(snapshot?.currentActivity || snapshot?.runningCommand) && (
+          <div className="runtime-strip">
+            <span className="pulse-dot" />
+            <span>{snapshot.currentActivity ?? '运行中'}</span>
+            {snapshot.runningCommand && <code>{snapshot.runningCommand}</code>}
+          </div>
+        )}
+
+        <section className="chat-feed" aria-label="会话内容">
+          {newSession && chatEntries.length === 0 ? (
+            <div className="empty-chat">
+              <span className="empty-mark">C</span>
+              <h1>今天想让电脑上的 Codex 做什么？</h1>
+              <p>选择项目目录，在下方输入任务。任务会在电脑上真实执行。</p>
+            </div>
+          ) : chatEntries.length === 0 ? (
+            <div className="empty-chat compact">
+              <span className="empty-mark">C</span>
+              <h1>{selectedThread?.name ?? selectedThread?.preview ?? '准备就绪'}</h1>
+              <p>在下方输入消息，将恢复这个历史 Thread 并开始新的 Turn。</p>
+            </div>
+          ) : (
+            <div className="message-column">
+              {chatEntries.map((entry) => <ChatMessage key={entry.id} entry={entry} />)}
+            </div>
           )}
 
-          {showNewSession && (
-            <form
-              className="session-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void run(async () => {
-                  await client.startThread(device.deviceId, newCwd.trim(), newText.trim());
-                  setNewText('');
-                  setShowNewSession(false);
-                  onNotify('新会话已创建，真实 Turn 已启动');
-                  await refreshThreads();
-                });
+          {approvals.map((approval) => (
+            <ApprovalCard
+              key={approval.approvalId}
+              approval={approval}
+              disabled={busy}
+              onDecision={(decision) => {
+                setBusy(true);
+                setError(undefined);
+                void onApprove(approval.approvalId, decision)
+                  .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+                  .finally(() => setBusy(false));
               }}
-            >
-              <label htmlFor="new-session-cwd">电脑上的项目目录</label>
+            />
+          ))}
+          {error && <p role="alert" className="chat-error">{error}</p>}
+        </section>
+
+        <div className="composer-dock">
+          {!hasActiveTurn && !selectedThread && (
+            <div className="project-picker">
+              <span>⌂</span>
+              <label className="sr-only" htmlFor="new-session-cwd">电脑上的项目目录</label>
               <input
                 id="new-session-cwd"
                 placeholder="D:\Projects\MES"
                 value={newCwd}
                 onChange={(event) => setNewCwd(event.target.value)}
               />
-              <label htmlFor="new-session-text">第一条任务</label>
-              <textarea
-                id="new-session-text"
-                placeholder="描述要让电脑上的 Codex 真正执行的任务"
-                value={newText}
-                onChange={(event) => setNewText(event.target.value)}
-                rows={4}
-              />
-              <button
-                className="primary-button"
-                disabled={busy || hasActiveTurn || !newCwd.trim() || !newText.trim()}
-              >
-                创建会话并开始
-              </button>
-            </form>
+            </div>
           )}
-
-          <div className="thread-list" aria-label="历史会话">
-            {historyLoading ? <p className="muted">正在读取电脑历史会话…</p> : threads.length === 0 ? (
-              <p className="muted">电脑的 Codex 存储中没有可恢复的会话。</p>
-            ) : threads.map((thread) => (
-              <button
-                key={thread.threadId}
-                className={`thread-item ${selectedThreadId === thread.threadId ? 'selected' : ''}`}
-                onClick={() => setSelectedThreadId(thread.threadId)}
-              >
-                <span className="thread-title">{thread.name ?? thread.preview ?? '未命名会话'}</span>
-                {thread.preview && thread.name && <span className="thread-preview">{thread.preview}</span>}
-                <span className="thread-meta">
-                  {thread.cwd ?? '未知目录'} · {formatThreadTime(thread.updatedAt ?? thread.createdAt)} · {thread.status}
-                </span>
-              </button>
-            ))}
-          </div>
-
-          {selectedThread && (
-            <form
-              className="session-form resume-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void run(async () => {
-                  await client.resumeThread(device.deviceId, selectedThread.threadId, resumeText.trim());
-                  setResumeText('');
-                  onNotify('历史会话已恢复，真实 Turn 已启动');
-                  await refreshThreads();
-                });
+          <form className="composer" onSubmit={submit}>
+            <label className="sr-only" htmlFor="chat-composer">{composerLabel}</label>
+            <textarea
+              id="chat-composer"
+              aria-label={composerLabel}
+              placeholder={composerPlaceholder}
+              value={composer}
+              onChange={(event) => setComposer(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
               }}
-            >
-              <strong>继续：{selectedThread.name ?? selectedThread.preview ?? selectedThread.threadId}</strong>
-              <textarea
-                aria-label="继续历史会话的任务"
-                placeholder="输入后续任务，将恢复该会话并开始新的 Turn"
-                value={resumeText}
-                onChange={(event) => setResumeText(event.target.value)}
-                rows={3}
-              />
+              rows={1}
+            />
+            <div className="composer-footer">
+              <span>{hasActiveTurn ? 'Steer 当前 Turn' : selectedThread ? '恢复历史会话' : '创建新会话'}</span>
               <button
-                className="primary-button"
-                disabled={busy || hasActiveTurn || !resumeText.trim()}
+                className="send-button"
+                aria-label={sendLabel}
+                title={sendLabel}
+                disabled={busy || !device.online || !composer.trim() || (!hasActiveTurn && !selectedThread && !newCwd.trim())}
               >
-                恢复会话并发送
+                ↑
               </button>
-            </form>
-          )}
-        </section>
-
-        {approvals.map((approval) => (
-          <ApprovalCard
-            key={approval.approvalId}
-            approval={approval}
-            disabled={busy}
-            onDecision={(decision) => run(() => onApprove(approval.approvalId, decision))}
-          />
-        ))}
-
-        <section className="control-card">
-          <h2>立即干预</h2>
-          <textarea
-            placeholder="不要修改数据库结构，只调整业务层。"
-            value={steer}
-            onChange={(event) => setSteer(event.target.value)}
-            rows={4}
-          />
-          <div className="button-row">
-            <button
-              className="primary-button"
-              disabled={busy || !device.online || !snapshot?.activeTurnId || !steer.trim()}
-              onClick={() => run(async () => {
-                await onSteer(steer.trim());
-                setSteer('');
-              })}
-            >
-              发送 Steer
-            </button>
-            <button
-              className="danger-button"
-              disabled={busy || !device.online || !snapshot?.activeTurnId}
-              onClick={() => run(async () => {
-                await onInterrupt();
-                setInterrupting(true);
-              })}
-            >
-              停止当前任务
-            </button>
-          </div>
-        </section>
-
-        <section className="timeline-card">
-          <h2>最近活动</h2>
-          {events.length === 0 ? <p className="muted">暂无事件</p> : (
-            <ol className="timeline">
-              {events.map((event) => (
-                <li key={event.eventId}>
-                  <time>{new Date(event.occurredAt).toLocaleTimeString()}</time>
-                  <strong>{event.kind}</strong>
-                  <span>{eventSummary(event.data)}</span>
-                </li>
-              ))}
-            </ol>
-          )}
-        </section>
-
-        {error && <p role="alert" className="error-message">{error}</p>}
+            </div>
+          </form>
+          <p className="composer-hint">Codex 会在你的电脑上运行。重要操作仍需审批。</p>
+        </div>
         {toast && <div key={toast} className="toast">{toast}</div>}
-        <button className="text-button danger-text" onClick={() => run(onRevoke)}>解除此电脑配对</button>
-      </section>
-    </main>
+      </main>
+    </div>
+  );
+}
+
+function ChatMessage({ entry }: { entry: ChatEntry }) {
+  if (entry.role === 'system') {
+    return <div className="system-message"><span>{entry.text}</span></div>;
+  }
+  if (entry.role === 'tool') {
+    return <div className="tool-message"><span>›_</span><div><strong>{entry.meta ?? '电脑操作'}</strong><p>{entry.text}</p></div></div>;
+  }
+  return (
+    <article className={`chat-message ${entry.role}`}>
+      {entry.role === 'assistant' && <span className="assistant-avatar">C</span>}
+      <div>
+        {entry.meta && <small>{entry.meta}</small>}
+        <p>{entry.text}</p>
+      </div>
+    </article>
   );
 }
 
@@ -504,17 +577,17 @@ function ApprovalCard({
     ? approval.availableDecisions
     : ['accept', 'decline', 'cancel'];
   return (
-    <section className="approval-card" aria-label="等待审批">
-      <div className="approval-title"><span>!</span><div><p className="eyebrow">等待审批</p><h2>{approval.requestMethod}</h2></div></div>
+    <section className="approval-message" aria-label="等待审批">
+      <div className="approval-heading"><span>!</span><div><strong>等待审批</strong><small>{approval.requestMethod}</small></div></div>
       {approval.command && <pre>{approval.command}</pre>}
-      {approval.cwd && <p className="muted">目录：{approval.cwd}</p>}
+      {approval.cwd && <p>目录：{approval.cwd}</p>}
       {approval.reason && <p>{approval.reason}</p>}
-      <div className="button-row">
+      <div className="approval-actions">
         {decisions.map((decision) => (
           <button
             key={JSON.stringify(decision)}
             disabled={disabled}
-            className={decisionKind(decision) === 'allow' ? 'primary-button' : 'secondary-button'}
+            className={decisionKind(decision) === 'allow' ? 'solid-button' : 'quiet-button'}
             onClick={() => onDecision(decision)}
           >
             {decisionLabel(decision)}
@@ -525,10 +598,6 @@ function ApprovalCard({
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
-}
-
 function StatusPill({ online, status }: { online: boolean; status?: string }) {
   const value = online ? status ?? 'Idle' : 'Offline';
   return <span className={`status-pill ${statusClass(value)}`}><i />{value}</span>;
@@ -537,7 +606,7 @@ function StatusPill({ online, status }: { online: boolean; status?: string }) {
 function statusClass(status: string) {
   if (status === 'WaitingApproval') return 'warning';
   if (status === 'Failed' || status === 'Offline') return 'offline';
-  if (status === 'Idle' || status === 'Completed') return 'idle';
+  if (status === 'Idle' || status === 'Completed' || status === 'Interrupted') return 'idle';
   return 'running';
 }
 
@@ -549,6 +618,47 @@ function decisionKind(decision: unknown) {
 function decisionLabel(decision: unknown) {
   const value = typeof decision === 'string' ? decision : Object.keys(decision as object)[0];
   return ({ accept: '允许一次', acceptForSession: '本次会话允许', decline: '拒绝', cancel: '拒绝并停止' } as Record<string, string>)[value] ?? value;
+}
+
+function buildChatEntries(events: CodexEvent[], snapshot: CodexSnapshot | undefined, threadId?: string): ChatEntry[] {
+  const entries: ChatEntry[] = [];
+  for (const event of [...events].reverse()) {
+    if (threadId && event.threadId && event.threadId !== threadId) continue;
+    const text = eventText(event.data);
+    switch (event.kind) {
+      case 'AgentMessageCompleted':
+        if (text) entries.push({ id: event.eventId, role: 'assistant', text });
+        break;
+      case 'CommandStarted':
+      case 'CommandCompleted':
+        if (text) entries.push({ id: event.eventId, role: 'tool', text, meta: event.kind === 'CommandStarted' ? '运行命令' : '命令完成' });
+        break;
+      case 'FileChanged':
+        if (text) entries.push({ id: event.eventId, role: 'tool', text, meta: '修改文件' });
+        break;
+      case 'ErrorOccurred':
+        entries.push({ id: event.eventId, role: 'system', text: text || '任务发生错误' });
+        break;
+      case 'TurnStarted':
+        entries.push({ id: event.eventId, role: 'system', text: 'Turn 已开始' });
+        break;
+      case 'TurnCompleted':
+        entries.push({ id: event.eventId, role: 'system', text: `Turn ${text || '已完成'}` });
+        break;
+    }
+  }
+
+  if (snapshot?.lastAgentMessage && !entries.some((entry) =>
+    entry.role === 'assistant' && entry.text === snapshot.lastAgentMessage,
+  )) {
+    entries.push({ id: 'snapshot-last-message', role: 'assistant', text: snapshot.lastAgentMessage });
+  }
+  return entries.slice(-80);
+}
+
+function eventText(data: Record<string, unknown>) {
+  const value = data.text ?? data.command ?? data.path ?? data.message ?? data.status;
+  return typeof value === 'string' ? value : '';
 }
 
 function formatCode(value: string) {
@@ -564,9 +674,4 @@ function formatThreadTime(value?: number) {
     hour: '2-digit',
     minute: '2-digit',
   });
-}
-
-function eventSummary(data: Record<string, unknown>) {
-  const value = data.command ?? data.text ?? data.status ?? data.delta;
-  return typeof value === 'string' ? value : '';
 }

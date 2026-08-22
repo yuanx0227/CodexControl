@@ -19,7 +19,18 @@ if (Test-Path -LiteralPath $outputRoot) {
         throw "Refusing to clean unexpected release directory: $resolved"
     }
 
-    Remove-Item -Recurse -Force -LiteralPath $resolved
+    # Windows 不允许删除另一个终端正在作为 cwd 使用的目录。Agent 发布目录本身保留，
+    # 但其内容必须全部删除，避免旧文件混入新的 single-file Release。
+    $preservedAgentDirectory = [System.IO.Path]::GetFullPath((Join-Path $outputRoot 'agent-win-x64'))
+    foreach ($child in Get-ChildItem -Force -LiteralPath $resolved) {
+        $childPath = [System.IO.Path]::GetFullPath($child.FullName)
+        if ($child.PSIsContainer -and $childPath -eq $preservedAgentDirectory) {
+            Get-ChildItem -Force -LiteralPath $childPath | Remove-Item -Recurse -Force
+            continue
+        }
+
+        Remove-Item -Recurse -Force -LiteralPath $childPath
+    }
 }
 
 $agentProject = Join-Path $workspace 'src\agent\CodexControl.Agent.csproj'

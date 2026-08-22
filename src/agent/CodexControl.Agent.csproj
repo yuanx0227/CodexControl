@@ -5,7 +5,7 @@
     <AssemblyName>CodexControlAgent</AssemblyName>
     <RootNamespace>CodexControl.Agent</RootNamespace>
     <Description>Standalone local control plane for Codex app-server.</Description>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <InvariantGlobalization>false</InvariantGlobalization>
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <PublishSingleFile>true</PublishSingleFile>

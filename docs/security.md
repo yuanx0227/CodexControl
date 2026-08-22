@@ -8,6 +8,15 @@
 - OpenAI/Codex 身份始终留在 Device；
 - 本地 TUI 只通过 loopback 连接 Agent。
 
+### Codex Desktop 运行时
+
+- 不附加、读取或控制 Desktop 已打开的会话；
+- 只识别 `WindowsApps\OpenAI.Codex_*` 包中的固定四个运行时文件；
+- 运行时只复制到当前用户数据目录，不修改 WindowsApps；
+- 以 Desktop 包版本隔离目录，并通过 staging directory + atomic move 发布；
+- 每次启动仍执行 `--version`、`--remote` 与 app-server stdio 能力检查；
+- 不复制或上传 Codex 配置、OpenAI API Key、Endpoint 或用户数据。
+
 ## 2. 密钥
 
 ### Device

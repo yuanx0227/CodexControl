@@ -6,7 +6,7 @@
 - .NET 8 SDK（允许更新 SDK 编译 `net8.0`）；
 - Node.js 24；
 - Docker Desktop（部署验证）；
-- 可执行的 Codex CLI；
+- Codex Desktop 或可执行的 Codex CLI；
 - PowerShell 7。
 
 ## Build
@@ -32,7 +32,7 @@ npm run build
 
 | Variable | Component | Required | Meaning |
 |---|---|---|---|
-| `CODEX_CONTROL_CODEX_PATH` | Agent | optional | Codex CLI path; `--codex-path` takes the same role |
+| `CODEX_CONTROL_CODEX_PATH` | Agent | optional | 显式 Codex CLI 路径；未设置时自动发现 PATH 或 Codex Desktop |
 | `CODEX_CONTROL_RELAY_URL` | Agent | optional | Relay root `wss://...`; `--relay-url` takes the same role |
 | `CODEX_CONTROL_DB` | Relay | production recommended | SQLite file path |
 | `CODEX_CONTROL_PAIRING_SECRET` | Relay | production required | Server HMAC secret, at least 32 random characters |
@@ -54,7 +54,7 @@ Playwright 使用本机 Edge channel 做 Chromium/Android 路径，并使用 Pla
 
 ## Real Codex
 
-Codex Desktop 包内 CLI 受 WindowsApps ACL 保护。测试时必须把以下同版本文件复制到一个临时目录：
+产品 Agent 会自动识别 Codex Desktop 的 WindowsApps 包，并把以下同版本文件原子暂存到 `%LOCALAPPDATA%\CodexControl\codex-runtimes\desktop\<包版本>`；第二次启动直接复用：
 
 ```text
 codex.exe
@@ -63,7 +63,7 @@ codex-command-runner.exe
 codex-windows-sandbox-setup.exe
 ```
 
-然后设置：
+真实测试 Runner 不调用产品启动入口，因此测试时仍把同版本文件复制到临时目录并设置：
 
 ```text
 CODEX_CONTROL_REAL_CODEX_PATH=<temp>\codex.exe

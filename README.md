@@ -15,6 +15,7 @@ Codex Control 是一套自托管的 Codex Control Plane，用于从手机或另�
 MVP 代码与自动化闭环已经实现：
 
 - `.NET 8` 独立 Windows Agent；
+- 自动发现 Codex Desktop 内置运行时并按 Desktop 版本原子暂存、复用；
 - app-server stdio JSON-RPC 与 localhost WebSocket Proxy；
 - 真实 `codex --remote` TUI；
 - Thread/Turn/Item/Approval 状态与 Domain Event；
@@ -28,7 +29,7 @@ MVP 代码与自动化闭环已经实现：
 - Docker Compose、nginx HTTPS/WSS、SQLite volume；
 - Fake、真实 Relay、真实浏览器和真实 Codex 测试。
 
-现场部署仍需提供：可信 TLS 证书、正式域名/反向代理、每台目标电脑可执行的独立 Codex CLI，以及真实多电脑/手机网络环境验收。
+现场部署仍需提供：可信 TLS 证书、正式域名/反向代理、每台目标电脑安装的 Codex Desktop 或可执行 Codex CLI，以及真实多电脑/手机网络环境验收。
 
 ## 目录
 
@@ -78,12 +79,13 @@ npm run dev
 
 ```powershell
 & '.\out\release\agent-win-x64\CodexControlAgent.exe' `
-  --codex-path 'C:\path\to\codex.exe' `
   --relay-url 'ws://127.0.0.1:5080' `
   --allow-insecure-relay `
   --device-name 'DEV-PC-01' `
   --pair
 ```
+
+默认会优先使用 PATH 中的独立 Codex CLI。若仅安装 Codex Desktop，Agent 会识别其 WindowsApps 包，把同版本的 `codex.exe`、Code Mode Host、Command Runner 和 Sandbox Setup 原子暂存到当前用户的 `%LOCALAPPDATA%\CodexControl\codex-runtimes\desktop` 后使用；不会附加 Desktop 已打开的会话。显式 `--codex-path` 仍可覆盖自动发现。
 
 Agent 输出：
 
@@ -91,7 +93,7 @@ Agent 输出：
 DEVICE dev_... DEV-PC-01
 PAIRING_CODE 583271 EXPIRES_AT ...
 READY ws://127.0.0.1:8765/
-CONNECT codex --remote ws://127.0.0.1:8765/
+CONNECT & 'C:\Users\...\CodexControl\codex-runtimes\desktop\...\codex.exe' --remote 'ws://127.0.0.1:8765/'
 ```
 
 生产环境删除 `--allow-insecure-relay` 并使用可信 `wss://`。

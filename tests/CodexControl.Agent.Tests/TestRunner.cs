@@ -31,6 +31,7 @@ internal static class TestRunner
             ("JsonRpcProtocol", TestJsonRpcProtocolAsync),
             ("AgentOptions_SecureRelay", TestAgentOptionsAsync),
             ("CodexStateManager", TestCodexStateManagerAsync),
+            ("CodexDesktopRuntimeResolver", TestCodexDesktopRuntimeResolverAsync),
             ("CodexExecutableProbe", TestCodexExecutableProbeAsync),
             ("AppServerBridge_LocalWsProxy", TestBridgeAndProxyAsync),
             ("RemoteControl_ApprovalArbitration", TestRemoteControlAndApprovalAsync),
@@ -153,6 +154,64 @@ internal static class TestRunner
         Assert(probe.Version == "codex-cli 0.0.0-fake", "fake version should be observed");
         Assert(probe.SupportsRemote, "--remote should be confirmed");
         Assert(probe.SupportsAppServerStdio, "stdio app-server should be confirmed");
+    }
+
+    private static async Task TestCodexDesktopRuntimeResolverAsync()
+    {
+        var testRoot = Path.Combine(
+            Path.GetTempPath(),
+            string.Concat("codex-control-desktop-runtime-tests-", Guid.NewGuid().ToString("N")));
+        var sourceDirectory = Path.Combine(
+            testRoot,
+            "OpenAI.Codex_99.1.2.3_x64__test",
+            "app",
+            "resources");
+        var dataDirectory = Path.Combine(testRoot, "data");
+        Directory.CreateDirectory(sourceDirectory);
+        try
+        {
+            foreach (var fileName in new[]
+                     {
+                         "codex.exe",
+                         "codex-code-mode-host.exe",
+                         "codex-command-runner.exe",
+                         "codex-windows-sandbox-setup.exe",
+                     })
+            {
+                File.Copy(GetTestExecutablePath(), Path.Combine(sourceDirectory, fileName));
+            }
+
+            var sourceExecutable = Path.Combine(sourceDirectory, "codex.exe");
+            var stages = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ =>
+                CodexRuntimeResolver.StageDesktopRuntimeAsync(
+                    sourceExecutable,
+                    dataDirectory,
+                    CancellationToken.None))).ConfigureAwait(false);
+            Assert(
+                stages.Select(value => value.ExecutablePath).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 1,
+                "concurrent staging should converge on one versioned runtime");
+            Assert(stages.Any(value => value.WasStaged), "one concurrent caller should stage the runtime");
+            Assert(File.Exists(stages[0].ExecutablePath), "staged codex executable should exist");
+            Assert(
+                Directory.GetDirectories(
+                    Path.Combine(dataDirectory, "codex-runtimes", "desktop"),
+                    "*.staging-*",
+                    SearchOption.TopDirectoryOnly).Length == 0,
+                "staging directories should be cleaned");
+
+            var reused = await CodexRuntimeResolver.StageDesktopRuntimeAsync(
+                sourceExecutable,
+                dataDirectory,
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(!reused.WasStaged, "completed desktop runtime should be reused");
+        }
+        finally
+        {
+            if (Directory.Exists(testRoot))
+            {
+                Directory.Delete(testRoot, recursive: true);
+            }
+        }
     }
 
     private static async Task TestBridgeAndProxyAsync()

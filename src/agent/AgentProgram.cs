@@ -37,6 +37,22 @@ public static class AgentProgram
             using var log = new AgentLog(options.LogDirectory);
             log.Info("startup", ".NET 8 CodexControlAgent starting");
 
+            var runtime = await CodexRuntimeResolver.ResolveAsync(
+                options.CodexPath,
+                options.DataDirectory,
+                CancellationToken.None).ConfigureAwait(false);
+            options = options with { CodexPath = runtime.ExecutablePath };
+            log.Info(
+                "codex_runtime_resolved",
+                $"Codex runtime source={runtime.Source}; staged={runtime.WasStaged}; " +
+                $"package={runtime.DesktopPackageName ?? "none"}");
+            if (runtime.Source == CodexRuntimeSource.DesktopBundle)
+            {
+                Console.WriteLine(
+                    $"CODEX_RUNTIME DESKTOP {runtime.DesktopPackageName} " +
+                    $"{(runtime.WasStaged ? "STAGED" : "REUSED")}");
+            }
+
             var probe = await CodexExecutableProbe.ProbeAsync(
                 options.CodexPath,
                 CancellationToken.None).ConfigureAwait(false);
@@ -87,7 +103,9 @@ public static class AgentProgram
                 }
 
                 Console.WriteLine($"READY {proxy.WebSocketUri}");
-                Console.WriteLine($"CONNECT codex --remote {proxy.WebSocketUri}");
+                Console.WriteLine(
+                    $"CONNECT & {ToPowerShellLiteral(options.CodexPath)} --remote " +
+                    ToPowerShellLiteral(proxy.WebSocketUri.ToString()));
 
                 var cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, shutdown.Token);
                 var completed = await Task.WhenAny(cancellationTask, bridge.Completion).ConfigureAwait(false);
@@ -156,4 +174,7 @@ public static class AgentProgram
             return 1;
         }
     }
+
+    private static string ToPowerShellLiteral(string value) =>
+        string.Concat("'", value.Replace("'", "''", StringComparison.Ordinal), "'");
 }

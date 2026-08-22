@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 - 2026-08-22
+
+- Added automatic discovery of the Codex Desktop runtime on Windows.
+- Added atomic per-version staging of the four Desktop runtime executables outside WindowsApps.
+- Added concurrent staging, reuse, real Desktop capability and hash verification.
+
 ## 0.1.0 - 2026-08-22
 
 - Added standalone `.NET 8` Windows Agent and managed `codex app-server` bridge.

@@ -162,7 +162,7 @@ public sealed record AgentOptions(
           CodexControlAgent.exe [options]
 
         参数：
-          --codex-path <path>        可执行的 Codex CLI 路径；也可用 CODEX_CONTROL_CODEX_PATH
+          --codex-path <path>        可执行的 Codex CLI 路径；默认也自动发现 Codex Desktop 运行时
           --port <1-65535>           localhost WebSocket 端口，默认 8765
           --log-dir <path>           rolling log 目录
           --max-message-bytes <n>    单条 WebSocket/JSONL 消息上限，默认 8 MiB

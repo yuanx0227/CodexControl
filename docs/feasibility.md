@@ -60,10 +60,21 @@ OpenAI.Codex_26.818.5229.0_x64
 PASS JsonRpcProtocol
 PASS AgentOptions_SecureRelay
 PASS CodexStateManager
+PASS CodexDesktopRuntimeResolver
 PASS CodexExecutableProbe
 PASS AppServerBridge_LocalWsProxy
 PASS RemoteControl_ApprovalArbitration
 PASS AgentRelay_DPAPI_Authentication_Pairing
+```
+
+本机 Codex Desktop 兼容验证：
+
+```text
+Desktop package: OpenAI.Codex_26.818.5229.0_x64__2p2nqsd0c76g0
+first launch: STAGED
+second launch: REUSED
+four runtime executable SHA-256 comparisons: PASS
+capability probe: --remote=true, app-server stdio=true
 ```
 
 真实 Codex：

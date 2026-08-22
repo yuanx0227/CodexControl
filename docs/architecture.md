@@ -29,6 +29,7 @@ Codex TUI
   │ ws://127.0.0.1:<port>
   ▼
 CodexControlAgent.exe (.NET 8 / Windows)
+  ├─ CodexRuntimeResolver (CLI / Desktop bundle staging)
   ├─ CodexExecutableProbe
   ├─ AppServerBridge
   ├─ LocalCodexProxyServer

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 - 2026-08-22
+
+- Added real Codex history from `thread/list`, including CLI, VS Code, app-server and exec sessions.
+- Added remote thread creation plus first `turn/start`, and historical thread resume plus a new turn.
+- Routed session controls through existing view/steer permissions and Relay request idempotency.
+- Rebuilt the mobile device detail page around real session control instead of snapshot-only controls.
+- Fixed persistent pairing/action toasts with timed state cleanup and a non-blocking visual lifecycle.
+- Added real Codex create/list/resume/delete acceptance and 12 Chromium/WebKit system tests.
+
 ## 0.1.2 - 2026-08-22
 
 - Added AppX package repository discovery when an independent PowerShell PATH cannot resolve Codex Desktop.

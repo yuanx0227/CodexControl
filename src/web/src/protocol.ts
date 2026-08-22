@@ -64,6 +64,27 @@ export interface DeviceListResult {
   devices: DeviceSummary[];
 }
 
+export interface CodexThreadSummary {
+  threadId: string;
+  name?: string;
+  preview?: string;
+  cwd?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  status: string;
+  sourceKind?: string;
+}
+
+export interface CodexThreadListResult {
+  threads: CodexThreadSummary[];
+  nextCursor?: string;
+}
+
+export interface CodexThreadActionResult {
+  threadId: string;
+  turnId: string;
+}
+
 export interface CodexEvent {
   eventId: string;
   revision: number;
@@ -88,11 +109,11 @@ export interface ApprovalRequested {
   requestedAt: number;
 }
 
-export interface ControlResult {
+export interface ControlResult<TResult = unknown> {
   status: 'accepted' | 'succeeded' | 'failed';
   code?: string;
   message?: string;
-  result?: unknown;
+  result?: TResult;
 }
 
 export interface ErrorPayload {

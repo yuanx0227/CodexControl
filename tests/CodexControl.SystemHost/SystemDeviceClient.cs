@@ -18,6 +18,7 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
     private Task? _readerTask;
     private Task? _heartbeatTask;
     private string? _connectionId;
+    private long _revision = 10;
 
     public SystemDeviceClient(Uri relayRoot)
     {
@@ -118,20 +119,12 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
                     await SendInitialStateAsync(cancellationToken).ConfigureAwait(false);
                     break;
                 case RelayMessageTypes.ControlSteer:
-                case RelayMessageTypes.ControlInterrupt:
                 case RelayMessageTypes.ControlApproval:
-                    await SendAsync(RelayEnvelope.Create(
-                        RelayMessageTypes.ControlResult,
-                        new ControlResultPayload(
-                            envelope.Type == RelayMessageTypes.ControlInterrupt
-                                ? ControlResultStatus.Accepted
-                                : ControlResultStatus.Succeeded,
-                            null,
-                            null,
-                            null),
-                        envelope.RequestId,
-                        DeviceId,
-                        envelope.ControllerId), cancellationToken).ConfigureAwait(false);
+                    await SendControlResultAsync(
+                        envelope,
+                        ControlResultStatus.Succeeded,
+                        null,
+                        cancellationToken).ConfigureAwait(false);
                     if (envelope.Type == RelayMessageTypes.ControlApproval)
                     {
                         await SendEventAsync(
@@ -141,29 +134,78 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
                     }
 
                     break;
+                case RelayMessageTypes.ControlInterrupt:
+                    await SendControlResultAsync(
+                        envelope,
+                        ControlResultStatus.Accepted,
+                        null,
+                        cancellationToken).ConfigureAwait(false);
+                    await SendSnapshotAsync(
+                        "Interrupted",
+                        null,
+                        null,
+                        "D:\\Projects\\SystemTest",
+                        "任务已停止",
+                        cancellationToken).ConfigureAwait(false);
+                    await SendEventAsync(
+                        "ApprovalResolved",
+                        new ApprovalResolvedPayload(
+                            "apr-system",
+                            "turn-interrupted",
+                            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case RelayMessageTypes.ControlThreadList:
+                    await SendControlResultAsync(
+                        envelope,
+                        ControlResultStatus.Succeeded,
+                        JsonSerializer.SerializeToElement(
+                            new CodexThreadListResultPayload(
+                            [
+                                new CodexThreadSummaryPayload(
+                                    "thr-history-system",
+                                    "系统历史会话",
+                                    "继续系统测试",
+                                    "D:\\Projects\\SystemTest",
+                                    DateTimeOffset.UtcNow.AddHours(-2).ToUnixTimeSeconds(),
+                                    DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeSeconds(),
+                                    "notLoaded",
+                                    "appServer"),
+                            ],
+                            null),
+                            RelayJson.Options),
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case RelayMessageTypes.ControlThreadStart:
+                    await SendThreadActionAsync(
+                        envelope,
+                        "thr-created-system",
+                        "turn-created-system",
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case RelayMessageTypes.ControlThreadResume:
+                    await SendThreadActionAsync(
+                        envelope,
+                        envelope.ReadPayload<ThreadResumeControlPayload>().ThreadId,
+                        "turn-resumed-system",
+                        cancellationToken).ConfigureAwait(false);
+                    break;
             }
         }
     }
 
     private async Task SendInitialStateAsync(CancellationToken cancellationToken)
     {
-        await SendAsync(RelayEnvelope.Create(
-            RelayMessageTypes.CodexSnapshot,
-            new CodexSnapshotPayload(
-                10,
-                "Thinking",
-                "thr-system",
-                "turn-system",
-                DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeMilliseconds(),
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                "D:\\Projects\\SystemTest",
-                "Running tests",
-                "dotnet test",
-                ["src/System.cs"],
-                1,
-                "等待远程控制",
-                null),
-            deviceId: DeviceId), cancellationToken).ConfigureAwait(false);
+        await SendSnapshotAsync(
+            "Thinking",
+            "thr-system",
+            "turn-system",
+            "D:\\Projects\\SystemTest",
+            "Running tests",
+            cancellationToken,
+            "dotnet test",
+            1,
+            "等待远程控制").ConfigureAwait(false);
         await SendEventAsync(
             "ApprovalRequested",
             new ApprovalRequestedPayload(
@@ -182,6 +224,68 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
             cancellationToken).ConfigureAwait(false);
     }
+
+    private Task SendControlResultAsync(
+        RelayEnvelope request,
+        ControlResultStatus status,
+        JsonElement? result,
+        CancellationToken cancellationToken) =>
+        SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.ControlResult,
+            new ControlResultPayload(status, null, null, result),
+            request.RequestId,
+            DeviceId,
+            request.ControllerId), cancellationToken);
+
+    private async Task SendThreadActionAsync(
+        RelayEnvelope request,
+        string threadId,
+        string turnId,
+        CancellationToken cancellationToken)
+    {
+        await SendControlResultAsync(
+            request,
+            ControlResultStatus.Succeeded,
+            JsonSerializer.SerializeToElement(
+                new CodexThreadActionResultPayload(threadId, turnId),
+                RelayJson.Options),
+            cancellationToken).ConfigureAwait(false);
+        await SendSnapshotAsync(
+            "Thinking",
+            threadId,
+            turnId,
+            "D:\\Projects\\SystemTest",
+            "远程会话运行中",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task SendSnapshotAsync(
+        string status,
+        string? threadId,
+        string? turnId,
+        string project,
+        string activity,
+        CancellationToken cancellationToken,
+        string? command = null,
+        int pendingApprovalCount = 0,
+        string? lastAgentMessage = null) =>
+        SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.CodexSnapshot,
+            new CodexSnapshotPayload(
+                Interlocked.Increment(ref _revision),
+                status,
+                threadId,
+                turnId,
+                turnId is null ? null : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                project,
+                activity,
+                command,
+                ["src/System.cs"],
+                pendingApprovalCount,
+                lastAgentMessage,
+                null),
+            deviceId: DeviceId), cancellationToken);
 
     private Task SendEventAsync<T>(string kind, T data, CancellationToken cancellationToken) =>
         SendAsync(RelayEnvelope.Create(

@@ -15,6 +15,18 @@ public sealed record ApprovalControlPayload(
     string ApprovalId,
     JsonElement Decision);
 
+public sealed record ThreadListControlPayload(
+    int Limit = 50,
+    string? Cursor = null);
+
+public sealed record ThreadStartControlPayload(
+    string Cwd,
+    string Text);
+
+public sealed record ThreadResumeControlPayload(
+    string ThreadId,
+    string Text);
+
 public enum ControlResultStatus
 {
     Accepted,

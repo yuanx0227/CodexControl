@@ -13,6 +13,7 @@ Codex Control 是 Codex Session 的控制面，不是 OpenAI 身份或模型代�
 - 将 Codex JSON-RPC 规范化为 Snapshot/Domain Event；
 - 通过自托管 Relay 连接多个 Device 和 Controller；
 - 执行 Steer、Interrupt、Approval 和状态恢复。
+- 列出本机 Codex 历史、创建 Thread、恢复历史 Thread 并启动真实 Turn。
 
 它不负责：
 
@@ -112,8 +113,20 @@ Snapshot 是不可变对象并带单调 `revision`。Domain Event 只包含移�
 - `threadId`；
 - 当前 `activeTurnId`；
 - `expectedTurnId`；
+- 新 Thread 的本机绝对 `cwd` 是否存在；
+- 创建/恢复会话时是否已有其他活动 Turn；
 - Approval ID 与 Decision；
 - app-server RPC 错误/超时。
+
+手机会话控制不是前端伪状态：
+
+```text
+历史: control.thread.list -> thread/list
+新建: control.thread.start -> thread/start -> turn/start
+恢复: control.thread.resume -> thread/resume -> turn/start
+```
+
+历史查询使用 `view` 权限；创建/恢复使用 `steer` 权限。远程创建/恢复强制 `approvalPolicy=untrusted` 与 `sandbox=workspace-write`，且同一 Agent 同时只允许一个远程活动 Turn。
 
 Interrupt RPC 成功只表示接受请求。UI 只有收到 `turn/completed status=interrupted` 后才显示 Interrupted。
 
@@ -222,6 +235,9 @@ Relay 不持久化完整事件流，只保存最新 Snapshot 和必要审计元�
 - 多设备列表与在线状态；
 - Snapshot 恢复；
 - 活动时间线；
+- 真实历史会话列表；
+- 新建会话并启动首个 Turn；
+- 恢复历史会话并启动后续 Turn；
 - Steer；
 - Interrupting/Interrupted 两阶段语义；
 - app-server 原始 Decision 审批；
@@ -266,7 +282,7 @@ Relay 容器不发布外部端口，只由 gateway 访问；`X-Forwarded-Proto=h
 - 单元/进程：Fake app-server、状态、路由、Approval；
 - Relay：真实 WebSocket + 临时 SQLite；
 - Browser：Playwright Edge/Chromium + iPhone WebKit + Web Crypto + 真实 Relay；
-- Codex：真实 TUI、真实 Turn、Steer、Approval Decline、Interrupt；
+- Codex：真实 TUI、历史列表、Thread 创建/恢复、真实 Turn、Steer、Approval Decline、Interrupt；
 - Docker：镜像、Compose、HTTPS/WSS、Health、volume restart；
 - Soak：持续连接/断开、Steer/Interrupt、app-server/Proxy 重启。
 

@@ -241,7 +241,10 @@ public sealed class RelayClient : IAsyncDisposable
         var requestId = NewRequestId();
         await SendDirectAsync(socket, RelayEnvelope.Create(
             RelayMessageTypes.AuthHello,
-            new AuthHelloPayload(PrincipalRole.Device, _identity.DeviceId, "0.1.0"),
+            new AuthHelloPayload(
+                PrincipalRole.Device,
+                _identity.DeviceId,
+                typeof(RelayClient).Assembly.GetName().Version?.ToString() ?? "0.2.0"),
             requestId,
             _identity.DeviceId), cancellationToken).ConfigureAwait(false);
         var challengeEnvelope = await ReceiveDirectAsync(socket, cancellationToken).ConfigureAwait(false);
@@ -290,6 +293,9 @@ public sealed class RelayClient : IAsyncDisposable
                 case RelayMessageTypes.ControlSteer:
                 case RelayMessageTypes.ControlInterrupt:
                 case RelayMessageTypes.ControlApproval:
+                case RelayMessageTypes.ControlThreadList:
+                case RelayMessageTypes.ControlThreadStart:
+                case RelayMessageTypes.ControlThreadResume:
                     await HandleControlAsync(envelope, cancellationToken).ConfigureAwait(false);
                     break;
                 case RelayMessageTypes.PairingCompleted:
@@ -377,6 +383,33 @@ public sealed class RelayClient : IAsyncDisposable
                             payload.ApprovalId,
                             payload.Decision,
                             envelope.ControllerId,
+                            cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
+                case RelayMessageTypes.ControlThreadList:
+                    {
+                        var payload = envelope.ReadPayload<ThreadListControlPayload>();
+                        result = await _dispatcher.ListThreadsAsync(
+                            payload.Limit,
+                            payload.Cursor,
+                            cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
+                case RelayMessageTypes.ControlThreadStart:
+                    {
+                        var payload = envelope.ReadPayload<ThreadStartControlPayload>();
+                        result = await _dispatcher.StartThreadAsync(
+                            payload.Cwd,
+                            payload.Text,
+                            cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
+                case RelayMessageTypes.ControlThreadResume:
+                    {
+                        var payload = envelope.ReadPayload<ThreadResumeControlPayload>();
+                        result = await _dispatcher.ResumeThreadAsync(
+                            payload.ThreadId,
+                            payload.Text,
                             cancellationToken).ConfigureAwait(false);
                         break;
                     }

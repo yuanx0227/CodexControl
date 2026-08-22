@@ -27,6 +27,9 @@ public static class RelayMessageTypes
     public const string ControlSteer = "control.steer";
     public const string ControlInterrupt = "control.interrupt";
     public const string ControlApproval = "control.approval";
+    public const string ControlThreadList = "control.thread.list";
+    public const string ControlThreadStart = "control.thread.start";
+    public const string ControlThreadResume = "control.thread.resume";
     public const string ControlResult = "control.result";
 
     public const string Heartbeat = "heartbeat";

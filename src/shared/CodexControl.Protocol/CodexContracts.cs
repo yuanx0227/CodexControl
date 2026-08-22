@@ -12,6 +12,24 @@ public sealed record DeviceSummaryPayload(
 public sealed record DeviceListResultPayload(
     IReadOnlyList<DeviceSummaryPayload> Devices);
 
+public sealed record CodexThreadSummaryPayload(
+    string ThreadId,
+    string? Name,
+    string? Preview,
+    string? Cwd,
+    long? CreatedAt,
+    long? UpdatedAt,
+    string Status,
+    string? SourceKind);
+
+public sealed record CodexThreadListResultPayload(
+    IReadOnlyList<CodexThreadSummaryPayload> Threads,
+    string? NextCursor);
+
+public sealed record CodexThreadActionResultPayload(
+    string ThreadId,
+    string TurnId);
+
 public sealed record CodexSnapshotPayload(
     long Revision,
     string Status,

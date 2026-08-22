@@ -187,6 +187,38 @@ internal static class RelayTestRunner
             .ConfigureAwait(false)).ReadPayload<ControlResultPayload>();
         Assert(controlResult.Status == ControlResultStatus.Succeeded, "control result should route back");
 
+        foreach (var remoteSessionControl in new (string Type, object Payload)[]
+                 {
+                     (RelayMessageTypes.ControlThreadList, new ThreadListControlPayload()),
+                     (RelayMessageTypes.ControlThreadStart, new ThreadStartControlPayload("D:\\Projects\\MES", "new task")),
+                     (RelayMessageTypes.ControlThreadResume, new ThreadResumeControlPayload("thr-history", "continue task")),
+                 })
+        {
+            var sessionRequestId = RelayTestClient.NewRequestId();
+            await controller.SendAsync(RelayEnvelope.Create(
+                remoteSessionControl.Type,
+                remoteSessionControl.Payload,
+                sessionRequestId,
+                device.PrincipalId,
+                controller.PrincipalId)).ConfigureAwait(false);
+            var routedSessionControl = await device.ReceiveAsync(remoteSessionControl.Type, sessionRequestId)
+                .ConfigureAwait(false);
+            Assert(
+                routedSessionControl.ControllerId == controller.PrincipalId,
+                $"{remoteSessionControl.Type} should route to the paired device");
+            await device.SendAsync(RelayEnvelope.Create(
+                RelayMessageTypes.ControlResult,
+                new ControlResultPayload(ControlResultStatus.Succeeded, null, null, null),
+                sessionRequestId,
+                device.PrincipalId,
+                controller.PrincipalId)).ConfigureAwait(false);
+            var sessionResult = (await controller.ReceiveAsync(RelayMessageTypes.ControlResult, sessionRequestId)
+                .ConfigureAwait(false)).ReadPayload<ControlResultPayload>();
+            Assert(
+                sessionResult.Status == ControlResultStatus.Succeeded,
+                $"{remoteSessionControl.Type} result should route back");
+        }
+
         await controller.SendAsync(RelayEnvelope.Create(
             RelayMessageTypes.ControlSteer,
             new SteerControlPayload("thr-1", "turn-1", "duplicate"),

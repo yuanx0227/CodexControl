@@ -82,6 +82,13 @@ approval
 
 解除配对后新 Control 立即 `PERMISSION_DENIED`。Control Result 必须匹配 Relay 已路由的 `requestId + deviceId + controllerId`，Device 不能向任意 Controller 伪造 Result。
 
+- `control.thread.list` 必须具有 `view`；
+- `control.thread.start` 与 `control.thread.resume` 必须具有 `steer`；
+- 新会话目录必须是 Device 上真实存在的绝对路径；
+- 创建/恢复强制 `approvalPolicy=untrusted` 与 `workspace-write` sandbox；
+- 活动 Turn 存在时拒绝创建或恢复另一会话；
+- Relay 只实时转发历史摘要和任务文本，不持久化其正文。
+
 ## 6. Approval
 
 - 不自动批准；
@@ -130,6 +137,8 @@ Relay 允许持久化：
 - 完整 Diff/源码；
 - 完整 Codex JSON-RPC 历史。
 
+`thread/list` 的名称、预览和 cwd 仅作为配对 Controller 的实时 `control.result` 返回，Relay 数据库和结构化日志都不保存这些字段。
+
 ## 9. 日志
 
 Agent rolling log：
@@ -160,6 +169,9 @@ Relay 使用结构化框架日志；EF 参数默认不输出值。生产应设�
 - 撤销后权限拒绝；
 - 重复/冲突 Control Request ID；
 - Device 伪造 Control Result；
+- 未授权历史读取/Thread 创建/Thread 恢复；
+- 活动 Turn 并发创建拒绝；
+- 本机项目路径不存在时失败关闭；
 - WebSocket Origin 拒绝；
 - 第二 TUI 拒绝；
 - 无效 capability；

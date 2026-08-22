@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import type { ApprovalRequested, DeviceSummary } from './protocol';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import type { ApprovalRequested, CodexThreadSummary, DeviceSummary } from './protocol';
 import { RelayClient, type RelayClientState } from './relayClient';
 import { loadRelayUrl, saveRelayUrl } from './storage';
 
@@ -17,6 +17,16 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string>();
   const [showPairing, setShowPairing] = useState(false);
   const [toast, setToast] = useState<string>();
+  const toastTimer = useRef<number | undefined>(undefined);
+
+  const showToast = useCallback((message: string) => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    setToast(message);
+    toastTimer.current = window.setTimeout(() => {
+      setToast(undefined);
+      toastTimer.current = undefined;
+    }, 2_500);
+  }, []);
 
   useEffect(() => {
     const unsubscribe = client.subscribe(setState);
@@ -27,10 +37,15 @@ export function App() {
     };
   }, [client]);
 
+  useEffect(() => () => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+  }, []);
+
   const selected = state.devices.find((device) => device.deviceId === selectedId);
   if (selected) {
     return (
       <DeviceDetail
+        client={client}
         device={selected}
         events={state.events[selected.deviceId] ?? []}
         approvals={state.approvals[selected.deviceId] ?? []}
@@ -39,23 +54,24 @@ export function App() {
           const snapshot = selected.snapshot;
           if (!snapshot?.activeThreadId || !snapshot.activeTurnId) throw new Error('当前没有活动 Turn');
           await client.steer(selected.deviceId, snapshot.activeThreadId, snapshot.activeTurnId, text);
-          setToast('干预已送入当前 Turn');
+          showToast('干预已送入当前 Turn');
         }}
         onInterrupt={async () => {
           const snapshot = selected.snapshot;
           if (!snapshot?.activeThreadId || !snapshot.activeTurnId) throw new Error('当前没有活动 Turn');
           await client.interrupt(selected.deviceId, snapshot.activeThreadId, snapshot.activeTurnId);
-          setToast('停止请求已接受，等待 Interrupted 终态');
+          showToast('停止请求已接受，等待 Interrupted 终态');
         }}
         onApprove={async (approvalId, decision) => {
           await client.approve(selected.deviceId, approvalId, decision);
-          setToast('审批结果已提交');
+          showToast('审批结果已提交');
         }}
         onRevoke={async () => {
           await client.revoke(selected.deviceId);
           setSelectedId(undefined);
-          setToast('已解除配对');
+          showToast('已解除配对');
         }}
+        onNotify={showToast}
         toast={toast}
       />
     );
@@ -74,7 +90,7 @@ export function App() {
           onPair={async (code) => {
             await client.pair(code);
             setShowPairing(false);
-            setToast('配对成功');
+            showToast('配对成功');
           }}
         />
       ) : (
@@ -93,7 +109,7 @@ export function App() {
               <DeviceCard key={device.deviceId} device={device} onOpen={() => setSelectedId(device.deviceId)} />
             ))}
           </div>
-          {toast && <div className="toast">{toast}</div>}
+          {toast && <div key={toast} className="toast">{toast}</div>}
         </section>
       )}
     </main>
@@ -205,6 +221,7 @@ function DeviceCard({ device, onOpen }: { device: DeviceSummary; onOpen: () => v
 }
 
 function DeviceDetail({
+  client,
   device,
   events,
   approvals,
@@ -213,8 +230,10 @@ function DeviceDetail({
   onInterrupt,
   onApprove,
   onRevoke,
+  onNotify,
   toast,
 }: {
+  client: RelayClient;
   device: DeviceSummary;
   events: Array<{ eventId: string; kind: string; occurredAt: number; data: Record<string, unknown> }>;
   approvals: ApprovalRequested[];
@@ -223,13 +242,38 @@ function DeviceDetail({
   onInterrupt: () => Promise<void>;
   onApprove: (approvalId: string, decision: unknown) => Promise<void>;
   onRevoke: () => Promise<void>;
+  onNotify: (message: string) => void;
   toast?: string;
 }) {
   const [steer, setSteer] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [interrupting, setInterrupting] = useState(false);
+  const [threads, setThreads] = useState<CodexThreadSummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [selectedThreadId, setSelectedThreadId] = useState<string>();
+  const [resumeText, setResumeText] = useState('');
+  const [showNewSession, setShowNewSession] = useState(false);
+  const [newCwd, setNewCwd] = useState(device.snapshot?.currentProject ?? '');
+  const [newText, setNewText] = useState('');
   const snapshot = device.snapshot;
+
+  const refreshThreads = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const history = await client.listThreads(device.deviceId);
+      setThreads(history.threads);
+      setError(undefined);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [client, device.deviceId]);
+
+  useEffect(() => {
+    void refreshThreads();
+  }, [refreshThreads]);
 
   useEffect(() => {
     if (snapshot?.status === 'Interrupted') setInterrupting(false);
@@ -247,6 +291,9 @@ function DeviceDetail({
     }
   }
 
+  const selectedThread = threads.find((thread) => thread.threadId === selectedThreadId);
+  const hasActiveTurn = Boolean(snapshot?.activeTurnId);
+
   return (
     <main className="app-shell">
       <header className="detail-header">
@@ -263,6 +310,122 @@ function DeviceDetail({
           <Metric label="运行命令" value={snapshot?.runningCommand ?? '—'} />
           <Metric label="最近消息" value={snapshot?.lastAgentMessage ?? '—'} />
         </div>
+
+        <section className="session-card" aria-label="Codex 会话控制">
+          <div className="session-heading">
+            <div>
+              <p className="eyebrow">Real app-server sessions</p>
+              <h2>Codex 会话</h2>
+              <p className="muted">历史来自电脑上的 <code>thread/list</code>；创建和恢复会直接启动真实 Turn。</p>
+            </div>
+            <div className="button-row compact-actions">
+              <button
+                className="secondary-button"
+                disabled={historyLoading || !device.online}
+                onClick={() => void refreshThreads()}
+              >
+                {historyLoading ? '加载中…' : '刷新历史'}
+              </button>
+              <button
+                className="primary-button"
+                disabled={!device.online || hasActiveTurn}
+                onClick={() => setShowNewSession((value) => !value)}
+              >
+                新建会话
+              </button>
+            </div>
+          </div>
+
+          {hasActiveTurn && (
+            <p className="session-warning">当前 Turn 正在运行；可在下方 Steer 或停止，结束后再创建/恢复会话。</p>
+          )}
+
+          {showNewSession && (
+            <form
+              className="session-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void run(async () => {
+                  await client.startThread(device.deviceId, newCwd.trim(), newText.trim());
+                  setNewText('');
+                  setShowNewSession(false);
+                  onNotify('新会话已创建，真实 Turn 已启动');
+                  await refreshThreads();
+                });
+              }}
+            >
+              <label htmlFor="new-session-cwd">电脑上的项目目录</label>
+              <input
+                id="new-session-cwd"
+                placeholder="D:\Projects\MES"
+                value={newCwd}
+                onChange={(event) => setNewCwd(event.target.value)}
+              />
+              <label htmlFor="new-session-text">第一条任务</label>
+              <textarea
+                id="new-session-text"
+                placeholder="描述要让电脑上的 Codex 真正执行的任务"
+                value={newText}
+                onChange={(event) => setNewText(event.target.value)}
+                rows={4}
+              />
+              <button
+                className="primary-button"
+                disabled={busy || hasActiveTurn || !newCwd.trim() || !newText.trim()}
+              >
+                创建会话并开始
+              </button>
+            </form>
+          )}
+
+          <div className="thread-list" aria-label="历史会话">
+            {historyLoading ? <p className="muted">正在读取电脑历史会话…</p> : threads.length === 0 ? (
+              <p className="muted">电脑的 Codex 存储中没有可恢复的会话。</p>
+            ) : threads.map((thread) => (
+              <button
+                key={thread.threadId}
+                className={`thread-item ${selectedThreadId === thread.threadId ? 'selected' : ''}`}
+                onClick={() => setSelectedThreadId(thread.threadId)}
+              >
+                <span className="thread-title">{thread.name ?? thread.preview ?? '未命名会话'}</span>
+                {thread.preview && thread.name && <span className="thread-preview">{thread.preview}</span>}
+                <span className="thread-meta">
+                  {thread.cwd ?? '未知目录'} · {formatThreadTime(thread.updatedAt ?? thread.createdAt)} · {thread.status}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {selectedThread && (
+            <form
+              className="session-form resume-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void run(async () => {
+                  await client.resumeThread(device.deviceId, selectedThread.threadId, resumeText.trim());
+                  setResumeText('');
+                  onNotify('历史会话已恢复，真实 Turn 已启动');
+                  await refreshThreads();
+                });
+              }}
+            >
+              <strong>继续：{selectedThread.name ?? selectedThread.preview ?? selectedThread.threadId}</strong>
+              <textarea
+                aria-label="继续历史会话的任务"
+                placeholder="输入后续任务，将恢复该会话并开始新的 Turn"
+                value={resumeText}
+                onChange={(event) => setResumeText(event.target.value)}
+                rows={3}
+              />
+              <button
+                className="primary-button"
+                disabled={busy || hasActiveTurn || !resumeText.trim()}
+              >
+                恢复会话并发送
+              </button>
+            </form>
+          )}
+        </section>
 
         {approvals.map((approval) => (
           <ApprovalCard
@@ -321,7 +484,7 @@ function DeviceDetail({
         </section>
 
         {error && <p role="alert" className="error-message">{error}</p>}
-        {toast && <div className="toast">{toast}</div>}
+        {toast && <div key={toast} className="toast">{toast}</div>}
         <button className="text-button danger-text" onClick={() => run(onRevoke)}>解除此电脑配对</button>
       </section>
     </main>
@@ -390,6 +553,17 @@ function decisionLabel(decision: unknown) {
 
 function formatCode(value: string) {
   return value.length > 3 ? `${value.slice(0, 3)} ${value.slice(3)}` : value;
+}
+
+function formatThreadTime(value?: number) {
+  if (!value) return '未知时间';
+  const milliseconds = value < 1_000_000_000_000 ? value * 1_000 : value;
+  return new Date(milliseconds).toLocaleString(undefined, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function eventSummary(data: Record<string, unknown>) {

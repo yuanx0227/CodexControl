@@ -70,7 +70,7 @@ CODEX_CONTROL_REAL_CODEX_PATH=<temp>\codex.exe
 CODEX_CONTROL_RUN_REAL_TURNS=1
 ```
 
-真实测试创建 ephemeral Thread，使用随机 `out/approval-probe-*.txt` 作为审批目标；测试必须 Decline，文件必须不存在，finally 仍会删除测试路径兜底。
+真实测试覆盖两组边界：审批测试创建 ephemeral Thread，使用随机 `out/approval-probe-*.txt` 作为审批目标并必须 Decline；远程会话测试创建一个 persisted Thread，验证历史列表、首个 Turn、恢复和第二个 Turn，finally 只用 `thread/delete` 删除这个测试创建的 Thread。
 
 ## Relay Migration
 

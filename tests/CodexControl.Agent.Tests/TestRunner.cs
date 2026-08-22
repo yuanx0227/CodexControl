@@ -10,6 +10,7 @@ using CodexControl.Agent.Proxy;
 using CodexControl.Agent.Relay;
 using CodexControl.Agent.Security;
 using CodexControl.Agent.State;
+using CodexControl.Protocol;
 using CodexControl.Relay;
 using CodexControl.Relay.Persistence;
 using Microsoft.AspNetCore.Builder;
@@ -38,6 +39,7 @@ internal static class TestRunner
             ("AgentRelay_DPAPI_Authentication_Pairing", TestAgentRelayAsync),
             ("RealCodex_AppServerBridge", TestRealCodexAsync),
             ("RealCodex_Steer_Approval_Interrupt", TestRealCodexControlAsync),
+            ("RealCodex_History_Create_Resume", TestRealCodexHistoryControlAsync),
         };
         var filter = Environment.GetEnvironmentVariable("CODEX_CONTROL_TEST_FILTER");
         var tests = string.IsNullOrWhiteSpace(filter)
@@ -575,6 +577,142 @@ internal static class TestRunner
         }
     }
 
+    private static async Task TestRealCodexHistoryControlAsync()
+    {
+        var codexPath = Environment.GetEnvironmentVariable("CODEX_CONTROL_REAL_CODEX_PATH");
+        var runRealTurns = Environment.GetEnvironmentVariable("CODEX_CONTROL_RUN_REAL_TURNS");
+        if (string.IsNullOrWhiteSpace(codexPath) || runRealTurns != "1")
+        {
+            throw new SkipTestException(
+                "CODEX_CONTROL_REAL_CODEX_PATH and CODEX_CONTROL_RUN_REAL_TURNS=1 are required");
+        }
+
+        var testRoot = Path.Combine(
+            Path.GetTempPath(),
+            string.Concat("codex-control-real-history-tests-", Guid.NewGuid().ToString("N")));
+        Directory.CreateDirectory(testRoot);
+        string? createdThreadId = null;
+        string? activeTurnId = null;
+        var completedTurns = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(
+            StringComparer.Ordinal);
+        var options = AgentOptions.ForTests(codexPath, Path.Combine(testRoot, "logs"));
+        using var log = new AgentLog(options.LogDirectory, maxBytes: 128 * 1024, retainedFiles: 2);
+        var state = new CodexStateManager();
+        await using var bridge = new AppServerBridge(options, log, state);
+        var dispatcher = new RemoteControlDispatcher(bridge, state);
+        try
+        {
+            bridge.ServerMessageReceived += message =>
+            {
+                if (!JsonRpcProtocol.TryGetMethod(message, out var method) || method != "turn/completed" ||
+                    !message.TryGetProperty("params", out var parameters) ||
+                    !parameters.TryGetProperty("turn", out var turn) ||
+                    !turn.TryGetProperty("id", out var id) ||
+                    id.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(id.GetString()))
+                {
+                    return;
+                }
+
+                completedTurns.TryAdd(id.GetString()!, 0);
+            };
+            await bridge.StartAsync(CancellationToken.None).ConfigureAwait(false);
+
+            var initialHistory = await dispatcher.ListThreadsAsync(
+                50,
+                null,
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(initialHistory.Succeeded, "real thread/list should succeed through remote dispatcher");
+
+            var created = await dispatcher.StartThreadAsync(
+                testRoot,
+                "Reply with exactly REMOTE_CREATE_OK and do not call tools.",
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(
+                created.Succeeded && created.Result is not null,
+                $"real remote thread creation should succeed: {created.ErrorCode} {created.ErrorMessage}");
+            var createdResult = created.Result ?? throw new InvalidOperationException("real create result missing");
+            var createdPayload = createdResult.Deserialize<CodexThreadActionResultPayload>(RelayJson.Options) ??
+                                 throw new InvalidOperationException("real create payload should deserialize");
+            createdThreadId = createdPayload.ThreadId;
+            activeTurnId = createdPayload.TurnId;
+            await WaitUntilAsync(
+                () => completedTurns.ContainsKey(createdPayload.TurnId),
+                TimeSpan.FromSeconds(90)).ConfigureAwait(false);
+            await WaitUntilAsync(
+                () => state.Snapshot.ActiveTurnId is null,
+                TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            activeTurnId = null;
+
+            var updatedHistory = await dispatcher.ListThreadsAsync(
+                100,
+                null,
+                CancellationToken.None).ConfigureAwait(false);
+            var updatedResult = updatedHistory.Result ??
+                                throw new InvalidOperationException("updated real history result missing");
+            var updatedPayload = updatedResult.Deserialize<CodexThreadListResultPayload>(RelayJson.Options) ??
+                                 throw new InvalidOperationException("updated real history should deserialize");
+            Assert(
+                updatedPayload.Threads.Any(thread => thread.ThreadId == createdThreadId),
+                "new appServer thread should appear in real history list");
+
+            var resumed = await dispatcher.ResumeThreadAsync(
+                createdThreadId,
+                "Reply with exactly REMOTE_RESUME_OK and do not call tools.",
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(
+                resumed.Succeeded && resumed.Result is not null,
+                $"real historical thread resume should succeed: {resumed.ErrorCode} {resumed.ErrorMessage}");
+            var resumedResult = resumed.Result ?? throw new InvalidOperationException("real resume result missing");
+            var resumedPayload = resumedResult.Deserialize<CodexThreadActionResultPayload>(RelayJson.Options) ??
+                                 throw new InvalidOperationException("real resume payload should deserialize");
+            Assert(resumedPayload.ThreadId == createdThreadId, "resume should continue the selected real thread");
+            activeTurnId = resumedPayload.TurnId;
+            await WaitUntilAsync(
+                () => completedTurns.ContainsKey(resumedPayload.TurnId),
+                TimeSpan.FromSeconds(90)).ConfigureAwait(false);
+            await WaitUntilAsync(
+                () => state.Snapshot.ActiveTurnId is null,
+                TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            activeTurnId = null;
+        }
+        finally
+        {
+            if (activeTurnId is not null && createdThreadId is not null)
+            {
+                _ = await dispatcher.InterruptAsync(
+                    createdThreadId,
+                    activeTurnId,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (createdThreadId is not null && bridge.IsReady)
+            {
+                try
+                {
+                    _ = await bridge.SendRequestAsync(
+                        "thread/delete",
+                        new { threadId = createdThreadId },
+                        TimeSpan.FromSeconds(30),
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is AppServerRpcException or TimeoutException or AgentException)
+                {
+                    throw new InvalidOperationException(
+                        $"Failed to delete real history test thread {createdThreadId}.",
+                        exception);
+                }
+            }
+
+            await bridge.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            log.Dispose();
+            if (Directory.Exists(testRoot))
+            {
+                Directory.Delete(testRoot, recursive: true);
+            }
+        }
+    }
+
     private static async Task TestRemoteControlAndApprovalAsync()
     {
         var testRoot = Path.Combine(
@@ -609,6 +747,50 @@ internal static class TestRunner
             Assert(interrupt.Succeeded, "interrupt RPC should be accepted");
             await WaitUntilAsync(
                 () => state.Snapshot.Status == CodexActivityStatus.Interrupted,
+                TestTimeout).ConfigureAwait(false);
+
+            var history = await dispatcher.ListThreadsAsync(
+                50,
+                null,
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(history.Succeeded && history.Result is not null, "history list should use real app-server RPC");
+            var historyResult = history.Result ?? throw new InvalidOperationException("history result is missing");
+            var historyPayload = historyResult.Deserialize<CodexThreadListResultPayload>(RelayJson.Options) ??
+                                 throw new InvalidOperationException("history payload should deserialize");
+            Assert(historyPayload.Threads.Count == 1, "history list should normalize stored threads");
+            Assert(
+                historyPayload.Threads[0].ThreadId == "thr-history-1" &&
+                historyPayload.Threads[0].SourceKind == "appServer",
+                "history metadata should be preserved");
+
+            var created = await dispatcher.StartThreadAsync(
+                testRoot,
+                "start a real remote task",
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(created.Succeeded && created.Result is not null, "remote thread creation should start a turn");
+            var createdResult = created.Result ?? throw new InvalidOperationException("created result is missing");
+            var createdPayload = createdResult.Deserialize<CodexThreadActionResultPayload>(RelayJson.Options) ??
+                                 throw new InvalidOperationException("created thread payload should deserialize");
+            Assert(
+                createdPayload.ThreadId == "thr-created" && createdPayload.TurnId == "turn-created",
+                "thread/start and turn/start IDs should be returned");
+            await WaitUntilAsync(
+                () => state.Snapshot.ActiveTurnId is null,
+                TestTimeout).ConfigureAwait(false);
+
+            var resumed = await dispatcher.ResumeThreadAsync(
+                "thr-history-1",
+                "continue the historical task",
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(resumed.Succeeded && resumed.Result is not null, "historical thread should resume and start a turn");
+            var resumedResult = resumed.Result ?? throw new InvalidOperationException("resumed result is missing");
+            var resumedPayload = resumedResult.Deserialize<CodexThreadActionResultPayload>(RelayJson.Options) ??
+                                 throw new InvalidOperationException("resumed thread payload should deserialize");
+            Assert(
+                resumedPayload.ThreadId == "thr-history-1" && resumedPayload.TurnId == "turn-resumed",
+                "thread/resume and turn/start IDs should be returned");
+            await WaitUntilAsync(
+                () => state.Snapshot.ActiveTurnId is null,
                 TestTimeout).ConfigureAwait(false);
 
             var approvalCompletion = new TaskCompletionSource<PendingApprovalSnapshot>(

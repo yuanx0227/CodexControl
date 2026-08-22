@@ -19,13 +19,14 @@ MVP 代码与自动化闭环已经实现：
 - app-server stdio JSON-RPC 与 localhost WebSocket Proxy；
 - 真实 `codex --remote` TUI；
 - Thread/Turn/Item/Approval 状态与 Domain Event；
+- 真实 `thread/list` 历史、创建新 Thread、恢复历史 Thread 并启动真实 Turn；
 - Steer、Interrupt、Command/File Approval first-valid-response-wins；
 - Windows DPAPI + ECDSA P-256 Device Identity；
 - Controller Web Crypto + IndexedDB 非导出私钥；
 - 六位码、三分钟 TTL、五次证明失败限制、一次性销毁；
 - Challenge/Signature 长期认证与 replay 防护；
 - Relay WSS、SQLite/EF Core Migration、Presence、Snapshot Cache、权限与审计元数据；
-- React/Vite PWA：配对、设备列表、详情、时间线、Steer、Interrupt、Approval、解除配对；
+- React/Vite PWA：配对、设备列表、真实会话历史、新建/恢复任务、时间线、Steer、Interrupt、Approval、解除配对；
 - Docker Compose、nginx HTTPS/WSS、SQLite volume；
 - Fake、真实 Relay、真实浏览器和真实 Codex 测试。
 
@@ -97,6 +98,8 @@ CONNECT & 'C:\Users\...\CodexControl\codex-runtimes\desktop\...\codex.exe' --rem
 ```
 
 生产环境删除 `--allow-insecure-relay` 并使用可信 `wss://`。
+
+配对后无需先打开本地 TUI：手机设备详情会直接读取电脑的 Codex 历史。选择历史会话可恢复并发送新任务；“新建会话”要求填写电脑上的绝对项目路径和第一条任务。若已有 Turn 正在运行，只能 Steer 或停止，结束后才能创建/恢复其他会话。
 
 ## Docker 部署
 

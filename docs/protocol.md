@@ -100,6 +100,9 @@ heartbeat.ack
 control.steer
 control.interrupt
 control.approval
+control.thread.list
+control.thread.start
+control.thread.resume
 control.result
 ```
 
@@ -437,7 +440,63 @@ ErrorOccurred
 
 Relay 默认不持久化完整 `data`；审计只保留 event kind、标识符、时间、结果和必要摘要。
 
-## 12. Steer
+## 12. 真实会话控制
+
+历史列表请求：
+
+```json
+{
+  "type": "control.thread.list",
+  "requestId": "ctlreq_01J...",
+  "deviceId": "dev_01J...",
+  "controllerId": "ctl_01J...",
+  "payload": { "limit": 50, "cursor": null }
+}
+```
+
+Device 调用 `thread/list`，按 `recency_at desc` 查询 `cli`、`vscode`、`appServer`、`exec` 和 `unknown` 来源。返回值只规范化 `threadId/name/preview/cwd/createdAt/updatedAt/status/sourceKind`，Relay 不持久化正文。该请求要求 `view` 权限。
+
+新建会话并立即启动真实 Turn：
+
+```json
+{
+  "type": "control.thread.start",
+  "requestId": "ctlreq_01J...",
+  "deviceId": "dev_01J...",
+  "controllerId": "ctl_01J...",
+  "payload": {
+    "cwd": "D:\\Projects\\MES",
+    "text": "修复登录模块并运行测试"
+  }
+}
+```
+
+Device 串行执行 `thread/start -> turn/start`。`cwd` 必须是 Device 上存在的绝对目录，任务文本非空且不超过 20000 字符。
+
+恢复历史并启动后续 Turn：
+
+```json
+{
+  "type": "control.thread.resume",
+  "requestId": "ctlreq_01J...",
+  "deviceId": "dev_01J...",
+  "controllerId": "ctl_01J...",
+  "payload": {
+    "threadId": "thr_123",
+    "text": "继续处理剩余失败测试"
+  }
+}
+```
+
+Device 串行执行 `thread/resume -> turn/start`。新建/恢复都要求 `steer` 权限，强制 `approvalPolicy=untrusted` 与 `sandbox=workspace-write`；若已有活动 Turn，返回 `TURN_ALREADY_ACTIVE`。
+
+成功 `result`：
+
+```json
+{ "threadId": "thr_123", "turnId": "turn_456" }
+```
+
+## 13. Steer
 
 Controller 请求：
 
@@ -459,7 +518,7 @@ Device 必须在调用 app-server 前重新核对本地活动 Thread/Turn。成�
 
 不能在 Turn 已结束时隐式调用 `turn/start`。
 
-## 13. Interrupt
+## 14. Interrupt
 
 ```json
 {
@@ -481,7 +540,7 @@ Device 必须在调用 app-server 前重新核对本地活动 Thread/Turn。成�
 
 若只完成第一阶段，不能显示任务已经停止。
 
-## 14. Approval
+## 15. Approval
 
 Approval Requested Event 必须携带 app-server 实际字段的规范化子集：
 
@@ -525,7 +584,7 @@ Pending -> Resolving -> Resolved
 
 失败发送时可从 `Resolving` 回到 `Pending`，但同一时刻只能有一个发送者。
 
-## 15. Control Result
+## 16. Control Result
 
 ```json
 {
@@ -554,7 +613,7 @@ failed
 
 Relay 以 `requestId + deviceId + controllerId + control type` 建立五分钟幂等记录。相同请求完成后返回缓存 Result；相同 `requestId` 改用于另一 Control 时返回 `REQUEST_ID_CONFLICT`。Device 返回的 `control.result` 必须匹配 Relay 已路由记录，否则返回 `CONTROL_RESULT_UNEXPECTED` 且不转发给 Controller。
 
-## 16. Error Codes
+## 17. Error Codes
 
 ```text
 CODEX_NOT_FOUND
@@ -570,7 +629,11 @@ REQUEST_ID_CONFLICT
 CONTROL_RESULT_UNEXPECTED
 TURN_NOT_ACTIVE
 TURN_MISMATCH
+TURN_ALREADY_ACTIVE
 THREAD_NOT_FOUND
+THREAD_CONTROL_FAILED
+PROJECT_PATH_INVALID
+PROJECT_NOT_FOUND
 RELAY_OFFLINE
 AUTH_FAILED
 AUTH_CHALLENGE_EXPIRED
@@ -591,7 +654,7 @@ INTERNAL_ERROR
 
 外部 `message` 是用户可理解文本，不能包含内部异常栈、Key、Token、完整命令输出或数据库细节。Relay 日志使用独立 correlation ID。
 
-## 17. 去重与顺序
+## 18. 去重与顺序
 
 - Relay 对每个已认证 Principal 缓存滑动窗口内的 `messageId`，重复消息不重复执行。
 - Control 命令以 `requestId` 幂等；同一 Controller + Device + requestId 必须返回第一次的最终结果。
@@ -599,7 +662,7 @@ INTERNAL_ERROR
 - PWA 发现 revision gap 时请求最新 Snapshot，不猜测缺失状态。
 - 重连后旧连接的 `connectionId` 失效，旧连接消息不得覆盖新连接 Presence。
 
-## 18. Rate Limit 基线
+## 19. Rate Limit 基线
 
 最低要求：
 
@@ -611,7 +674,7 @@ INTERNAL_ERROR
 
 具体数值在 Relay 压测后写入配置，不能硬编码在三个客户端中。
 
-## 19. 数据保留
+## 20. 数据保留
 
 允许持久化：
 
@@ -631,7 +694,7 @@ INTERNAL_ERROR
 - 完整 diff 或项目代码；
 - 完整 Codex 原始 JSON-RPC 历史。
 
-## 20. v1 验证状态
+## 21. v1 验证状态
 
 已自动化验证：
 

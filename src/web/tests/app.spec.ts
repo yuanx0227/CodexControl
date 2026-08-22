@@ -10,7 +10,8 @@ interface CapturedMessage {
 
 const deviceId = 'dev_1234567890abcdef1234567890abcdef';
 
-async function installRelayMock(page: Page) {
+async function installRelayMock(page: Page, options: { activeTurn?: boolean } = {}) {
+  const activeTurn = options.activeTurn ?? true;
   const captured: CapturedMessage[] = [];
   let route: WebSocketRoute | undefined;
   await page.routeWebSocket('**/ws/controller', (socket) => {
@@ -41,10 +42,10 @@ async function installRelayMock(page: Page) {
               lastSeenAt: Date.now(),
               snapshot: {
                 revision: 7,
-                status: 'Thinking',
-                activeThreadId: 'thr-1',
-                activeTurnId: 'turn-1',
-                startedAt: Date.now() - 60_000,
+                status: activeTurn ? 'Thinking' : 'Idle',
+                activeThreadId: activeTurn ? 'thr-1' : undefined,
+                activeTurnId: activeTurn ? 'turn-1' : undefined,
+                startedAt: activeTurn ? Date.now() - 60_000 : undefined,
                 lastActivityAt: Date.now(),
                 currentProject: 'D:\\Projects\\MES',
                 currentActivity: 'Running tests',
@@ -61,6 +62,35 @@ async function installRelayMock(page: Page) {
         case 'control.approval':
           socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
             status: envelope.type === 'control.interrupt' ? 'accepted' : 'succeeded',
+          }, envelope.deviceId, envelope.controllerId)));
+          break;
+        case 'control.thread.list':
+          socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
+            status: 'succeeded',
+            result: {
+              threads: [{
+                threadId: 'thr-history-1',
+                name: '历史测试会话',
+                preview: '继续修复登录模块',
+                cwd: 'D:\\Projects\\MES',
+                createdAt: 1_730_831_111,
+                updatedAt: 1_730_832_222,
+                status: 'notLoaded',
+                sourceKind: 'appServer',
+              }],
+            },
+          }, envelope.deviceId, envelope.controllerId)));
+          break;
+        case 'control.thread.start':
+          socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
+            status: 'succeeded',
+            result: { threadId: 'thr-created', turnId: 'turn-created' },
+          }, envelope.deviceId, envelope.controllerId)));
+          break;
+        case 'control.thread.resume':
+          socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
+            status: 'succeeded',
+            result: { threadId: envelope.payload.threadId, turnId: 'turn-resumed' },
           }, envelope.deviceId, envelope.controllerId)));
           break;
         case 'pairing.revoked':
@@ -139,7 +169,7 @@ test('pairs with a signed proof and renders the recovered device snapshot', asyn
   expect(String(claim?.payload.proofSignature).length).toBeGreaterThan(80);
 
   await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
-  await expect(page.getByText('D:\\Projects\\MES')).toBeVisible();
+  await expect(page.getByText('D:\\Projects\\MES', { exact: true })).toBeVisible();
   await expect(page.getByText('dotnet test')).toBeVisible();
   await expect(page.getByText('正在修复失败测试')).toBeVisible();
 });
@@ -153,17 +183,54 @@ test('sends steer, interrupt and the exact available approval decision', async (
   await page.getByRole('button', { name: '发送 Steer' }).click();
   await expect.poll(() => relay.captured.some((message) => message.type === 'control.steer')).toBe(true);
 
-  await page.getByRole('button', { name: '停止当前任务' }).click();
+  const interruptButton = page.getByRole('button', { name: '停止当前任务' });
+  await expect(interruptButton).toBeEnabled();
+  await interruptButton.click({ force: true });
   await expect.poll(() => relay.captured.some((message) => message.type === 'control.interrupt')).toBe(true);
 
   relay.sendApproval();
   const approval = page.getByRole('region', { name: '等待审批' });
   await expect(approval).toBeVisible();
   await expect(approval.getByText('git push origin main')).toBeVisible();
-  await page.getByRole('button', { name: '允许一次' }).click();
+  const allowButton = page.getByRole('button', { name: '允许一次' });
+  await expect(allowButton).toBeEnabled();
+  await allowButton.click({ force: true });
   await expect.poll(() => relay.captured.some((message) =>
     message.type === 'control.approval' && message.payload.decision === 'accept',
   )).toBe(true);
+});
+
+test('lists real history and starts or resumes Codex sessions', async ({ page }) => {
+  const relay = await installRelayMock(page, { activeTurn: false });
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+
+  await expect(page.getByRole('region', { name: 'Codex 会话控制' })).toBeVisible();
+  await expect(page.getByText('历史测试会话')).toBeVisible();
+  await page.getByRole('button', { name: '新建会话' }).click();
+  await page.getByLabel('电脑上的项目目录').fill('D:\Projects\NewProject');
+  await page.getByLabel('第一条任务').fill('从手机创建真实会话');
+  await page.getByRole('button', { name: '创建会话并开始' }).click();
+  await expect.poll(() => relay.captured.some((message) =>
+    message.type === 'control.thread.start' && message.payload.text === '从手机创建真实会话',
+  )).toBe(true);
+
+  await page.getByRole('button', { name: /历史测试会话/u }).click();
+  await page.getByLabel('继续历史会话的任务').fill('继续历史任务');
+  await page.getByRole('button', { name: '恢复会话并发送' }).click();
+  await expect.poll(() => relay.captured.some((message) =>
+    message.type === 'control.thread.resume' && message.payload.threadId === 'thr-history-1',
+  )).toBe(true);
+});
+
+test('pairing success toast clears automatically', async ({ page }) => {
+  await page.clock.install();
+  await installRelayMock(page, { activeTurn: false });
+  await pair(page);
+  const toast = page.getByText('配对成功', { exact: true });
+  await expect(toast).toBeVisible();
+  await page.clock.fastForward(3_000);
+  await expect(toast).toHaveCount(0);
 });
 
 test('is mobile-safe and exposes installable PWA metadata', async ({ page, request }) => {

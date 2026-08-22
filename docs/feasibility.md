@@ -84,6 +84,7 @@ PATH with only WindowsApps alias: AppX registry fallback REUSED / PASS
 ```text
 PASS RealCodex_AppServerBridge
 PASS RealCodex_Steer_Approval_Interrupt
+PASS RealCodex_History_Create_Resume
 ```
 
 真实控制测试使用完整同版本 Codex 运行时：
@@ -101,6 +102,18 @@ turn/completed status=interrupted
 ```
 
 随机测试文件审批被拒绝，文件未创建。
+
+真实远程会话测试另外执行：
+
+```text
+thread/list
+thread/start (persisted)
+turn/start
+thread/list contains new appServer thread
+thread/resume
+second turn/start
+thread/delete test-created thread
+```
 
 ## 4. Relay 测试
 
@@ -137,12 +150,14 @@ Playwright mobile Edge/Chromium + iPhone WebKit：
 ```text
 PASS signed pairing proof + recovered snapshot
 PASS steer + interrupt + exact approval decision
+PASS real history + thread start + thread resume
+PASS pairing toast automatic dismissal
 PASS mobile layout + manifest + service worker
 PASS real Relay + browser Web Crypto + reload authentication recovery (Chromium + WebKit)
 PASS iPhone WebKit pairing/control/PWA metadata
 ```
 
-总计 8 个浏览器用例通过（Chromium 4 + WebKit 4）。
+总计 12 个浏览器用例通过（Chromium 6 + WebKit 6）。
 
 真实系统测试不是 WebSocket Mock：Playwright 浏览器用 Web Crypto 生成不可导出私钥，Relay 实际验证 Pairing Proof 和 Auth Signature，真实路由 Control 到签名 Device 客户端。
 
@@ -201,6 +216,8 @@ SQLite volume 在 Relay restart 前后 SHA-256 一致，证明持久化 volume �
 | J Relay restart | PASS | Docker restart + SQLite volume hash |
 | K 一个 Controller 三台 PC | PASS | Relay three-device pairing/list 测试 |
 | L 未配对 Controller 隔离 | PASS | zero-device isolation + permission test |
+| M 手机查看真实历史 | PASS | `control.thread.list -> thread/list` + 浏览器/真实 Codex 测试 |
+| N 手机新建/恢复会话 | PASS | `thread/start/resume -> turn/start` + 浏览器/真实 Codex 测试 |
 
 ## 8. 安全扫描
 

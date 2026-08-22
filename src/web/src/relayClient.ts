@@ -15,6 +15,8 @@ import {
   type AuthOk,
   type CodexEvent,
   type CodexSnapshot,
+  type CodexThreadActionResult,
+  type CodexThreadListResult,
   type ControlResult,
   type DeviceListResult,
   type DeviceSummary,
@@ -142,6 +144,39 @@ export class RelayClient {
     return this.control(MessageType.controlApproval, deviceId, { approvalId, decision });
   }
 
+  async listThreads(deviceId: string, cursor?: string): Promise<CodexThreadListResult> {
+    const result = await this.control<CodexThreadListResult>(
+      MessageType.controlThreadList,
+      deviceId,
+      { limit: 50, cursor },
+      45_000,
+    );
+    if (!result.result) throw new Error('Agent 未返回历史会话');
+    return result.result;
+  }
+
+  async startThread(deviceId: string, cwd: string, text: string): Promise<CodexThreadActionResult> {
+    const result = await this.control<CodexThreadActionResult>(
+      MessageType.controlThreadStart,
+      deviceId,
+      { cwd, text },
+      45_000,
+    );
+    if (!result.result) throw new Error('Agent 未返回新会话 ID');
+    return result.result;
+  }
+
+  async resumeThread(deviceId: string, threadId: string, text: string): Promise<CodexThreadActionResult> {
+    const result = await this.control<CodexThreadActionResult>(
+      MessageType.controlThreadResume,
+      deviceId,
+      { threadId, text },
+      45_000,
+    );
+    if (!result.result) throw new Error('Agent 未返回恢复后的会话 ID');
+    return result.result;
+  }
+
   async revoke(deviceId: string): Promise<void> {
     const identity = this.requireIdentity();
     await this.request(
@@ -191,7 +226,7 @@ export class RelayClient {
     this.send(
       createEnvelope(
         MessageType.authHello,
-        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.1.0' },
+        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.2.0' },
         { requestId: this.authRequestId, controllerId: identity.controllerId },
       ),
     );
@@ -285,24 +320,34 @@ export class RelayClient {
     );
   }
 
-  private async control(type: string, deviceId: string, payload: unknown): Promise<ControlResult> {
+  private async control<TResult = unknown>(
+    type: string,
+    deviceId: string,
+    payload: unknown,
+    timeoutMs = 15_000,
+  ): Promise<ControlResult<TResult>> {
     const identity = this.requireIdentity();
     const response = await this.request(type, payload, {
       deviceId,
       controllerId: identity.controllerId,
-    });
-    const result = response.payload as ControlResult;
+    }, timeoutMs);
+    const result = response.payload as ControlResult<TResult>;
     if (result.status === 'failed') throw new Error(`${result.code ?? 'CONTROL_FAILED'}: ${result.message ?? ''}`);
     return result;
   }
 
-  private request(type: string, payload: unknown, ids: { deviceId?: string; controllerId?: string }): Promise<RelayEnvelope> {
+  private request(
+    type: string,
+    payload: unknown,
+    ids: { deviceId?: string; controllerId?: string },
+    timeoutMs = 15_000,
+  ): Promise<RelayEnvelope> {
     const id = requestId();
     return new Promise((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Relay request timeout: ${type}`));
-      }, 15_000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try {
         this.send(createEnvelope(type, payload, { requestId: id, ...ids }));

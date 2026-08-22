@@ -106,11 +106,88 @@ internal static class FakeCodexCommand
 
             if (method == "thread/list")
             {
+                var includeRemoteHistory = message.TryGetProperty("params", out var listParams) &&
+                                           listParams.TryGetProperty("sourceKinds", out _);
+                using var resultDocument = JsonDocument.Parse(includeRemoteHistory
+                    ? """
+                      {
+                        "data":[
+                          {
+                            "id":"thr-history-1",
+                            "name":"历史测试会话",
+                            "preview":"修复登录模块",
+                            "cwd":"D:\\Projects\\MES",
+                            "createdAt":1730831111,
+                            "updatedAt":1730832222,
+                            "status":{"type":"notLoaded"},
+                            "source":{"kind":"appServer"}
+                          }
+                        ],
+                        "nextCursor":null
+                      }
+                      """
+                    : """{"data":[],"nextCursor":null}""");
+                await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (method == "thread/start")
+            {
                 using var resultDocument = JsonDocument.Parse("""
-                    {"data":[],"nextCursor":null}
+                    {"thread":{"id":"thr-created","cwd":"D:\\Projects\\New"}}
                     """);
                 await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
                     .ConfigureAwait(false);
+                await WriteAsync("""
+                    {"method":"thread/started","params":{"thread":{"id":"thr-created","cwd":"D:\\Projects\\New"}}}
+                    """).ConfigureAwait(false);
+                continue;
+            }
+
+            if (method == "thread/resume")
+            {
+                var threadId = message.GetProperty("params").GetProperty("threadId").GetString();
+                using var resultDocument = JsonDocument.Parse(
+                    $"{{\"thread\":{{\"id\":{JsonSerializer.Serialize(threadId)}}}}}");
+                await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
+                    .ConfigureAwait(false);
+                await WriteAsync(JsonSerializer.Serialize(new
+                {
+                    method = "thread/started",
+                    @params = new { thread = new { id = threadId } },
+                })).ConfigureAwait(false);
+                continue;
+            }
+
+            if (method == "turn/start")
+            {
+                var threadId = message.GetProperty("params").GetProperty("threadId").GetString() ?? "thr-unknown";
+                var turnId = string.Equals(threadId, "thr-created", StringComparison.Ordinal)
+                    ? "turn-created"
+                    : "turn-resumed";
+                using var resultDocument = JsonDocument.Parse(
+                    $"{{\"turn\":{{\"id\":{JsonSerializer.Serialize(turnId)},\"status\":\"inProgress\"}}}}");
+                await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
+                    .ConfigureAwait(false);
+                await WriteAsync(JsonSerializer.Serialize(new
+                {
+                    method = "turn/started",
+                    @params = new
+                    {
+                        threadId,
+                        turn = new { id = turnId, status = "inProgress" },
+                    },
+                })).ConfigureAwait(false);
+                await WriteAsync(JsonSerializer.Serialize(new
+                {
+                    method = "turn/completed",
+                    @params = new
+                    {
+                        threadId,
+                        turn = new { id = turnId, status = "completed" },
+                    },
+                })).ConfigureAwait(false);
                 continue;
             }
 

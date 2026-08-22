@@ -196,9 +196,10 @@ Proof 失败上限: 5
 - Device/Controller 认证；
 - Pairing 与权限；
 - 在线连接注册；
-- 15 秒 Heartbeat / 45 秒 Offline；
+- 15 秒 Heartbeat / 120 秒失活回收；
 - 最新 Snapshot 缓存；
 - Control/Result 路由；
+- 同一 Controller 身份的多标签连接注册与扇出；
 - 审计元数据；
 - 速率限制。
 
@@ -247,6 +248,8 @@ Relay 不持久化完整事件流，只保存最新 Snapshot 和必要审计元�
 - 解除配对；
 - Service Worker 与 Manifest。
 
+同一浏览器身份可以同时打开多个标签页。Relay 为 Device 保留单连接替换语义，但按 `controllerId + connectionId` 保存全部 Controller 页面；Presence、Snapshot、Event 和 Control Result 会发送给该 Controller 身份的所有活动页面，未发起请求的页面会忽略不匹配的 `requestId`。
+
 重载或手机挂起恢复：
 
 ```text
@@ -262,10 +265,10 @@ IndexedDB Identity
 Agent backoff：
 
 ```text
-1s, 2s, 5s, 10s, 30s, 30s...
+1s, 2s, 3s, 5s, 10s, 10s...
 ```
 
-带 0–20% jitter。重连后先认证并发送最新 Snapshot。Relay 使用 connection replacement fencing，旧连接关闭时不能把新连接误标 Offline。
+Controller backoff 为 `0.5s, 1s, 2s, 5s, 10s...`。两者都带 0–20% jitter。重连后先认证并恢复设备列表；只读历史列表/正文请求会等待 Controller 与 Agent 都恢复在线后自动重试。Device 使用 connection replacement fencing，Controller 多标签互不替换。
 
 ## 9. 部署
 

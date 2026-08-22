@@ -344,7 +344,7 @@ v1 权限结构：
 
 ## 9. Presence 与 Heartbeat
 
-Device 每 15 秒发送：
+Device 与 Controller 每 15 秒发送：
 
 ```json
 {
@@ -358,15 +358,16 @@ Device 每 15 秒发送：
 }
 ```
 
-Relay 返回 `heartbeat.ack`。45 秒没有收到任何有效消息时标记 Device Offline。
+Relay 返回 `heartbeat.ack`。120 秒没有收到任何有效消息时回收失活连接；Device 被回收后广播 Offline，Controller 页面重新可见后自行认证恢复。
 
 重连 backoff：
 
 ```text
-1s, 2s, 5s, 10s, 30s, 30s...
+Agent: 1s, 2s, 3s, 5s, 10s, 10s...
+Controller: 0.5s, 1s, 2s, 5s, 10s, 10s...
 ```
 
-每次加入 0% 到 20% 的正向 jitter。成功稳定连接 60 秒后重置 backoff。
+每次加入 0% 到 20% 的正向 jitter，认证成功后重置 backoff。同一 `controllerId` 可以同时注册多个 `connectionId`；新标签页不得关闭旧标签页。Device 仍保持单活动连接，避免同一电脑重复执行 Control。
 
 ## 10. Codex Snapshot
 

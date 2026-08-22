@@ -120,10 +120,12 @@ internal static class RelayTestRunner
             Assert(error.Code == "PAIRING_INVALID", "invalid pairing code should fail closed");
         }
 
+        using var controllerKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         await using var controller = new RelayTestClient(
             PrincipalRole.Controller,
             string.Concat("ctl_", Guid.NewGuid().ToString("N")),
-            "Yuanx Phone");
+            "Yuanx Phone",
+            controllerKey);
         await controller.ConnectAsync(baseUri).ConfigureAwait(false);
         var claimRequestId = RelayTestClient.NewRequestId();
         await controller.SendAsync(RelayEnvelope.Create(
@@ -143,6 +145,37 @@ internal static class RelayTestRunner
         var list = (await controller.ReceiveAsync(RelayMessageTypes.DeviceListResult, listRequestId)
             .ConfigureAwait(false)).ReadPayload<DeviceListResultPayload>();
         Assert(list.Devices.Count == 1 && list.Devices[0].Online, "paired online device should be listed");
+
+        await using var secondControllerTab = new RelayTestClient(
+            PrincipalRole.Controller,
+            controller.PrincipalId,
+            "Yuanx Phone - second tab",
+            controllerKey);
+        await secondControllerTab.ConnectAsync(baseUri).ConfigureAwait(false);
+        await secondControllerTab.AuthenticateAsync().ConfigureAwait(false);
+
+        var firstTabAfterDuplicateId = RelayTestClient.NewRequestId();
+        await controller.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.DeviceList,
+            new { },
+            firstTabAfterDuplicateId,
+            controllerId: controller.PrincipalId)).ConfigureAwait(false);
+        _ = await controller.ReceiveAsync(RelayMessageTypes.DeviceListResult, firstTabAfterDuplicateId)
+            .ConfigureAwait(false);
+
+        var secondTabListId = RelayTestClient.NewRequestId();
+        await secondControllerTab.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.DeviceList,
+            new { },
+            secondTabListId,
+            controllerId: secondControllerTab.PrincipalId)).ConfigureAwait(false);
+        var secondTabList = (await secondControllerTab.ReceiveAsync(
+                RelayMessageTypes.DeviceListResult,
+                secondTabListId)
+            .ConfigureAwait(false)).ReadPayload<DeviceListResultPayload>();
+        Assert(
+            secondTabList.Devices.Count == 1 && secondTabList.Devices[0].Online,
+            "same controller identity should remain connected in multiple tabs");
 
         var snapshot = new CodexSnapshotPayload(
             1,
@@ -165,6 +198,9 @@ internal static class RelayTestRunner
         var forwardedSnapshot = (await controller.ReceiveAsync(RelayMessageTypes.CodexSnapshot)
             .ConfigureAwait(false)).ReadPayload<CodexSnapshotPayload>();
         Assert(forwardedSnapshot.Revision == 1, "snapshot should be forwarded");
+        var secondTabSnapshot = (await secondControllerTab.ReceiveAsync(RelayMessageTypes.CodexSnapshot)
+            .ConfigureAwait(false)).ReadPayload<CodexSnapshotPayload>();
+        Assert(secondTabSnapshot.Revision == 1, "snapshot should reach every tab for the controller identity");
 
         var controlRequestId = RelayTestClient.NewRequestId();
         await controller.SendAsync(RelayEnvelope.Create(

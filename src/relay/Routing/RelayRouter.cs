@@ -136,7 +136,10 @@ public sealed class RelayRouter
                     break;
                 }
 
-                _connections.GetController(envelope.ControllerId)?.TrySend(envelope with { DeviceId = deviceId });
+                foreach (var controller in _connections.GetControllers(envelope.ControllerId))
+                {
+                    controller.TrySend(envelope with { DeviceId = deviceId });
+                }
 
                 await AuditAsync(envelope.Type, deviceId, envelope.ControllerId, envelope.RequestId, "result", cancellationToken)
                     .ConfigureAwait(false);
@@ -372,7 +375,10 @@ public sealed class RelayRouter
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         foreach (var controllerId in controllerIds)
         {
-            _connections.GetController(controllerId)?.TrySend(envelope with { ControllerId = controllerId });
+            foreach (var controller in _connections.GetControllers(controllerId))
+            {
+                controller.TrySend(envelope with { ControllerId = controllerId });
+            }
         }
     }
 

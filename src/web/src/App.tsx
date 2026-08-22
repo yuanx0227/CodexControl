@@ -57,6 +57,7 @@ export function App() {
         events={state.events[selected.deviceId] ?? []}
         approvals={state.approvals[selected.deviceId] ?? []}
         connection={state.connection}
+        authenticated={state.authenticated}
         onBack={() => setSelectedId(undefined)}
         onApprove={async (approvalId, decision) => {
           await client.approve(selected.deviceId, approvalId, decision);
@@ -252,6 +253,7 @@ function DeviceWorkspace({
   events,
   approvals,
   connection,
+  authenticated,
   onBack,
   onApprove,
   onInterrupt,
@@ -264,6 +266,7 @@ function DeviceWorkspace({
   events: CodexEvent[];
   approvals: ApprovalRequested[];
   connection: RelayClientState['connection'];
+  authenticated: boolean;
   onBack: () => void;
   onApprove: (approvalId: string, decision: unknown) => Promise<void>;
   onInterrupt: () => Promise<void>;
@@ -289,6 +292,11 @@ function DeviceWorkspace({
   const threadHistoryRequest = useRef(0);
   const chatFeed = useRef<HTMLElement>(null);
   const snapshot = device.snapshot;
+  const workspaceConnection = authenticated
+    ? connection
+    : connection === 'offline'
+      ? 'offline'
+      : 'connecting';
 
   const refreshThreads = useCallback(async () => {
     setHistoryLoading(true);
@@ -556,7 +564,7 @@ function DeviceWorkspace({
         <div className="sidebar-footer">
           <div className="sidebar-device">
             <span className="device-avatar small">{device.name.slice(0, 1).toUpperCase()}</span>
-            <span><strong>{device.name}</strong><small><ConnectionState connection={connection} /></small></span>
+            <span><strong>{device.name}</strong><small><ConnectionState connection={workspaceConnection} /></small></span>
           </div>
           <button className="sidebar-action" onClick={() => void refreshThreads()}>刷新会话</button>
           <button className="sidebar-action danger" onClick={() => void onRevoke()}>解除配对</button>

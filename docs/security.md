@@ -35,6 +35,7 @@
 - IndexedDB 保存不可导出的 private `CryptoKey`；
 - public key 使用 65-byte uncompressed SEC1；
 - Signature 使用 IEEE P1363 `R || S`。
+- 同一 IndexedDB 身份打开的多个标签页属于同一 Controller principal，可同时保持独立 `connectionId` 并接收该 principal 已获授权的数据；其他 Controller ID 仍严格隔离。
 
 ## 3. Authentication
 

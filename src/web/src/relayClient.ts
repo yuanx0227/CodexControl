@@ -45,6 +45,8 @@ interface PendingRequest {
 }
 
 export class RelayClient {
+  private static readonly readRecoveryTimeoutMs = 30_000;
+  private static readonly readRecoveryAttempts = 3;
   private identity?: StoredControllerIdentity;
   private socket?: WebSocket;
   private listeners = new Set<Listener>();
@@ -112,6 +114,7 @@ export class RelayClient {
     );
     const completed = envelope.payload as PairingCompleted;
     this.identity = await addPairedDevice(identity, completed.deviceId);
+    this.reconnectAttempt = 0;
     this.setState({ authenticated: true, connection: 'connected', lastError: undefined });
     this.startHeartbeat();
     await this.refreshDevices();
@@ -150,7 +153,7 @@ export class RelayClient {
     const seenThreadIds = new Set<string>();
     let cursor: string | undefined;
     for (let page = 0; page < 5; page += 1) {
-      const result = await this.control<CodexThreadListResult>(
+      const result = await this.readControl<CodexThreadListResult>(
         MessageType.controlThreadList,
         deviceId,
         { limit: 100, cursor },
@@ -172,7 +175,7 @@ export class RelayClient {
   }
 
   async readThread(deviceId: string, threadId: string): Promise<CodexThreadReadResult> {
-    const result = await this.control<CodexThreadReadResult>(
+    const result = await this.readControl<CodexThreadReadResult>(
       MessageType.controlThreadRead,
       deviceId,
       { threadId },
@@ -233,17 +236,22 @@ export class RelayClient {
     const socket = new WebSocket(relayUrl);
     this.socket = socket;
     socket.onopen = () => {
-      this.reconnectAttempt = 0;
       this.setState({ connection: 'connected', lastError: undefined });
-      void this.beginAuthentication();
+      void this.beginAuthentication().catch(() => socket.close());
     };
-    socket.onmessage = (event) => void this.handleMessage(String(event.data));
+    socket.onmessage = (event) => void this.handleMessage(String(event.data)).catch(() => socket.close());
     socket.onerror = () => socket.close();
     socket.onclose = () => {
+      if (this.socket !== socket) return;
+      this.socket = undefined;
       if (this.heartbeatTimer) window.clearInterval(this.heartbeatTimer);
       this.connectionId = undefined;
       this.failPending(new Error('Relay connection lost'));
-      this.setState({ connection: 'offline', authenticated: false });
+      this.setState({
+        connection: 'offline',
+        authenticated: false,
+        devices: this.state.devices.map((device) => ({ ...device, online: false })),
+      });
       if (!this.stopped) this.scheduleReconnect();
     };
   }
@@ -254,7 +262,7 @@ export class RelayClient {
     this.send(
       createEnvelope(
         MessageType.authHello,
-        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.3.0' },
+        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.3.1' },
         { requestId: this.authRequestId, controllerId: identity.controllerId },
       ),
     );
@@ -278,6 +286,7 @@ export class RelayClient {
     if (envelope.type === MessageType.authOk) {
       const auth = envelope.payload as AuthOk;
       this.connectionId = auth.connectionId;
+      this.reconnectAttempt = 0;
       this.setState({ authenticated: true, connection: 'connected', lastError: undefined });
       this.startHeartbeat();
       await this.refreshDevices();
@@ -364,6 +373,27 @@ export class RelayClient {
     return result;
   }
 
+  private async readControl<TResult>(
+    type: string,
+    deviceId: string,
+    payload: unknown,
+    timeoutMs: number,
+  ): Promise<ControlResult<TResult>> {
+    let lastError = new Error('只读请求失败');
+    for (let attempt = 0; attempt < RelayClient.readRecoveryAttempts; attempt += 1) {
+      try {
+        return await this.control<TResult>(type, deviceId, payload, timeoutMs);
+      } catch (reason) {
+        lastError = reason instanceof Error ? reason : new Error(String(reason));
+        if (!isTransientReadFailure(lastError) || attempt === RelayClient.readRecoveryAttempts - 1) {
+          throw lastError;
+        }
+        await this.waitForDeviceReady(deviceId, RelayClient.readRecoveryTimeoutMs);
+      }
+    }
+    throw lastError;
+  }
+
   private request(
     type: string,
     payload: unknown,
@@ -401,25 +431,44 @@ export class RelayClient {
     throw new Error('Relay 连接超时');
   }
 
+  private async waitForDeviceReady(deviceId: string, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.stopped) throw new Error('Relay client stopped');
+      const device = this.state.devices.find((candidate) => candidate.deviceId === deviceId);
+      if (this.state.authenticated && this.socket?.readyState === WebSocket.OPEN && device?.online) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    throw new Error('Relay 或 Agent 连接恢复超时');
+  }
+
   private startHeartbeat(): void {
     if (this.heartbeatTimer) window.clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = window.setInterval(() => {
-      if (!this.connectionId) return;
+      if (!this.connectionId || this.socket?.readyState !== WebSocket.OPEN) return;
       const identity = this.requireIdentity();
-      this.send(
-        createEnvelope(
-          MessageType.heartbeat,
-          { connectionId: this.connectionId, snapshotRevision: 0 },
-          { controllerId: identity.controllerId },
-        ),
-      );
+      try {
+        this.send(
+          createEnvelope(
+            MessageType.heartbeat,
+            { connectionId: this.connectionId, snapshotRevision: 0 },
+            { controllerId: identity.controllerId },
+          ),
+        );
+      } catch {
+        this.socket?.close();
+      }
     }, 15_000);
   }
 
   private scheduleReconnect(): void {
-    const delays = [1000, 2000, 5000, 10_000, 30_000];
+    const delays = [500, 1000, 2000, 5000, 10_000];
     const base = delays[Math.min(this.reconnectAttempt++, delays.length - 1)];
-    this.reconnectTimer = window.setTimeout(() => this.open(), base * (1 + Math.random() * 0.2));
+    if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = undefined;
+      this.open();
+    }, base * (1 + Math.random() * 0.2));
   }
 
   private applyDeviceList(payload: DeviceListResult): void {
@@ -482,6 +531,14 @@ export class RelayClient {
 
 function requestId(): string {
   return `req_${crypto.randomUUID().replaceAll('-', '')}`;
+}
+
+function isTransientReadFailure(error: Error) {
+  return error.message === 'Relay connection lost'
+    || error.message === 'Relay 尚未连接'
+    || error.message.startsWith('DEVICE_OFFLINE:')
+    || error.message.startsWith('RELAY_OFFLINE:')
+    || error.message.startsWith('Relay request timeout:');
 }
 
 function validateRelayUrl(value: string): URL {

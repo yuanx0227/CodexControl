@@ -41,7 +41,7 @@ public sealed record RelayOptions(
             $"Data Source={fullDatabasePath};Cache=Shared;Foreign Keys=True;Pooling=False",
             secret,
             DefaultMaxMessageBytes,
-            TimeSpan.FromSeconds(45),
+            TimeSpan.FromSeconds(120),
             environment.IsDevelopment(),
             ParseAllowedOrigins(configuration, environment));
     }

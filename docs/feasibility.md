@@ -140,6 +140,7 @@ PASS Relay_Persistence_NoPlaintextCode
 - forged Control Result 拒绝；
 - revoke 后权限拒绝；
 - 一个 Controller 三台 Device；
+- 同一 Controller 身份多标签并存；
 - 未配对 Controller 零数据；
 - SQLite Migration 与 Audit。
 

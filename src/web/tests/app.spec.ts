@@ -10,23 +10,41 @@ interface CapturedMessage {
 
 const deviceId = 'dev_1234567890abcdef1234567890abcdef';
 
-async function installRelayMock(page: Page, options: { activeTurn?: boolean } = {}) {
+async function installRelayMock(page: Page, options: {
+  activeTurn?: boolean;
+  disconnectThreadListOnce?: boolean;
+  disconnectThreadReadOnce?: boolean;
+} = {}) {
   const activeTurn = options.activeTurn ?? true;
   const captured: CapturedMessage[] = [];
+  let paired = false;
+  let connectionCount = 0;
+  let disconnectThreadListOnce = options.disconnectThreadListOnce ?? false;
+  let disconnectThreadReadOnce = options.disconnectThreadReadOnce ?? false;
   let route: WebSocketRoute | undefined;
   await page.routeWebSocket('**/ws/controller', (socket) => {
+    connectionCount += 1;
     route = socket;
     socket.onMessage((message) => {
       const envelope = JSON.parse(String(message)) as CapturedMessage;
       captured.push(envelope);
       switch (envelope.type) {
         case 'auth.hello':
-          socket.send(JSON.stringify(reply('error', envelope.requestId, {
-            code: 'AUTH_FAILED',
-            message: 'Controller is not paired yet.',
-          })));
+          if (paired) {
+            socket.send(JSON.stringify(reply('auth.ok', envelope.requestId, {
+              role: 'controller',
+              principalId: envelope.controllerId,
+              connectionId: `conn-${connectionCount}`,
+            }, undefined, envelope.controllerId)));
+          } else {
+            socket.send(JSON.stringify(reply('error', envelope.requestId, {
+              code: 'AUTH_FAILED',
+              message: 'Controller is not paired yet.',
+            })));
+          }
           break;
         case 'pairing.claim':
+          paired = true;
           socket.send(JSON.stringify(reply('pairing.completed', envelope.requestId, {
             deviceId,
             controllerId: envelope.controllerId,
@@ -65,6 +83,11 @@ async function installRelayMock(page: Page, options: { activeTurn?: boolean } = 
           }, envelope.deviceId, envelope.controllerId)));
           break;
         case 'control.thread.list':
+          if (disconnectThreadListOnce) {
+            disconnectThreadListOnce = false;
+            void socket.close({ code: 1012, reason: 'test relay restart during thread list' });
+            break;
+          }
           socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
             status: 'succeeded',
             result: {
@@ -100,6 +123,11 @@ async function installRelayMock(page: Page, options: { activeTurn?: boolean } = 
           }, envelope.deviceId, envelope.controllerId)));
           break;
         case 'control.thread.read': {
+          if (disconnectThreadReadOnce) {
+            disconnectThreadReadOnce = false;
+            void socket.close({ code: 1012, reason: 'test relay restart during thread read' });
+            break;
+          }
           const threadId = String(envelope.payload.threadId);
           socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
             status: 'succeeded',
@@ -145,6 +173,7 @@ async function installRelayMock(page: Page, options: { activeTurn?: boolean } = 
 
   return {
     captured,
+    getConnectionCount: () => connectionCount,
     sendApproval() {
       if (!route) throw new Error('WebSocket mock is not connected');
       route.send(JSON.stringify(reply('codex.event', undefined, {
@@ -196,7 +225,7 @@ async function pair(page: Page) {
   await expect(page.getByRole('heading', { name: '连接你的电脑' })).toBeVisible();
   await page.getByLabel('六位配对码').fill('123456');
   await page.getByRole('button', { name: '配对', exact: true }).click();
-  await expect(page.getByRole('button', { name: '打开 DEV-PC-01' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '打开 DEV-PC-01' })).toBeVisible({ timeout: 20_000 });
 }
 
 test('pairs with a signed proof and renders the recovered device snapshot', async ({ page }) => {
@@ -280,6 +309,29 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
   await expect.poll(() => relay.captured.some((message) =>
     message.type === 'control.thread.resume' && message.payload.threadId === 'thr-history-1',
   )).toBe(true);
+});
+
+test('recovers history after controller disconnects during list and read', async ({ page }) => {
+  const relay = await installRelayMock(page, {
+    activeTurn: false,
+    disconnectThreadListOnce: true,
+    disconnectThreadReadOnce: true,
+  });
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  const historyButton = page.getByRole('button', { name: /^历史测试会话/u });
+  await expect(historyButton).toBeVisible({ timeout: 20_000 });
+  await historyButton.click();
+  await expect(page.getByText('请继续修复登录模块', { exact: true })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText('登录模块的历史修复已经完成', { exact: true })).toBeVisible();
+  await expect(page.getByText('Relay connection lost', { exact: true })).toHaveCount(0);
+  await expect.poll(relay.getConnectionCount).toBeGreaterThanOrEqual(3);
+  await expect.poll(() => relay.captured.filter((message) => message.type === 'control.thread.list').length)
+    .toBeGreaterThanOrEqual(2);
+  await expect.poll(() => relay.captured.filter((message) => message.type === 'control.thread.read').length)
+    .toBeGreaterThanOrEqual(2);
 });
 
 test('pairing success toast clears automatically', async ({ page }) => {

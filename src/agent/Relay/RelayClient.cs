@@ -18,7 +18,7 @@ public sealed class RelayClient : IAsyncDisposable
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
-    private static readonly int[] BackoffSeconds = [1, 2, 5, 10, 30];
+    private static readonly int[] BackoffSeconds = [1, 2, 3, 5, 10];
 
     private readonly AgentOptions _options;
     private readonly DeviceIdentity _identity;

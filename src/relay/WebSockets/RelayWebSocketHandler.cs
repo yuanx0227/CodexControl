@@ -6,6 +6,7 @@ using CodexControl.Relay.Configuration;
 using CodexControl.Relay.Pairing;
 using CodexControl.Relay.Routing;
 using CodexControl.Relay.Security;
+using Microsoft.AspNetCore.Connections;
 
 namespace CodexControl.Relay.WebSockets;
 
@@ -92,6 +93,10 @@ public sealed class RelayWebSocketHandler
         catch (WebSocketException exception)
         {
             _logger.LogInformation(exception, "Relay WebSocket disconnected for {RemoteAddress}", remoteAddress);
+        }
+        catch (ConnectionAbortedException exception)
+        {
+            _logger.LogInformation(exception, "Relay WebSocket aborted for {RemoteAddress}", remoteAddress);
         }
         catch (Exception exception)
         {

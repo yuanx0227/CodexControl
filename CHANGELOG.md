@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 - 2026-08-23
+
+- Fixed same-controller browser tabs repeatedly replacing and aborting each other's Relay connections.
+- Broadcast device presence, snapshots and control results to every live tab for the authenticated Controller identity.
+- Added automatic recovery for read-only history requests interrupted by Relay or Agent reconnects.
+- Increased the browser-friendly heartbeat tolerance and shortened Controller/Agent reconnect backoff.
+- Added multi-tab Relay and list/read disconnect recovery coverage.
+
 ## 0.3.0 - 2026-08-23
 
 - Added permission-checked `thread/read` history loading so selecting a session renders its persisted user and assistant messages.

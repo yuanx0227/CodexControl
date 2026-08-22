@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>CodexControlAgentTests</AssemblyName>
+    <RootNamespace>CodexControl.Agent.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\agent\CodexControl.Agent.csproj" />
+    <ProjectReference Include="..\..\src\relay\CodexControl.Relay.csproj" />
+  </ItemGroup>
+</Project>

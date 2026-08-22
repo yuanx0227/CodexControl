@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>CodexControlRelayTests</AssemblyName>
+    <RootNamespace>CodexControl.Relay.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\..\src\relay\CodexControl.Relay.csproj" />
+    <ProjectReference Include="..\..\src\shared\CodexControl.Protocol\CodexControl.Protocol.csproj" />
+  </ItemGroup>
+</Project>

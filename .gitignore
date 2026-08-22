@@ -1,0 +1,36 @@
+# Local code intelligence and IDE state
+.codegraph/
+.vs/
+.vscode/
+*.suo
+*.user
+
+# Native and managed build output
+build/
+out/
+bin/
+obj/
+TestResults/
+CMakeUserPresets.json
+
+# Web dependencies and output
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+test-results/
+playwright-report/
+
+# Runtime-only state
+logs/
+*.log
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+deploy/certs/*.pem
+
+# Generated app-server protocol bundles
+generated/app-server-schema/

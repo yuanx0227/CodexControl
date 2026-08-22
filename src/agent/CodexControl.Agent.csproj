@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>CodexControlAgent</AssemblyName>
+    <RootNamespace>CodexControl.Agent</RootNamespace>
+    <Description>Standalone local control plane for Codex app-server.</Description>
+    <Version>0.1.0</Version>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\shared\CodexControl.Protocol\CodexControl.Protocol.csproj" />
+  </ItemGroup>
+</Project>

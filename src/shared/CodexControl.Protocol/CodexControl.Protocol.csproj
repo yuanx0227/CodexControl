@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>CodexControl.Protocol</RootNamespace>
+    <AssemblyName>CodexControl.Protocol</AssemblyName>
+    <Description>Shared Relay protocol contracts for Codex Control.</Description>
+  </PropertyGroup>
+</Project>

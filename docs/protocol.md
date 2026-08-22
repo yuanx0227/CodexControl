@@ -685,7 +685,7 @@ INTERNAL_ERROR
 最低要求：
 
 - Pairing Claim：按 IP、Code 和 ControllerId 限速；
-- Device registration/enrollment：按 IP 和 installation ID 限速；
+- Device registration/enrollment：未知身份按 IP 严格限制首次登记；已登记且公钥匹配的 installation ID 使用独立的短窗口重连限流，不消耗首次登记额度；
 - Authentication failure：按 IP 和 Principal 限速；
 - Control command：按 Pairing 和 Device 限速；
 - 消息大小和每秒消息数限速。

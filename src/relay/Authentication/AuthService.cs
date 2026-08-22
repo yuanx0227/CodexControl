@@ -18,13 +18,29 @@ public sealed class AuthService
         _challenges = challenges;
     }
 
+    public async Task<bool> IsRegisteredDeviceIdentityAsync(
+        DeviceRegisterPayload payload,
+        CancellationToken cancellationToken)
+    {
+        if (!IsValidDeviceRegistration(payload))
+        {
+            return false;
+        }
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var device = await db.Devices.AsNoTracking().SingleOrDefaultAsync(
+            value => value.Id == payload.DeviceId,
+            cancellationToken).ConfigureAwait(false);
+        return device is not null &&
+               device.RevokedAt is null &&
+               KeysEqual(device.PublicKey, payload.PublicKey);
+    }
+
     public async Task<ServiceResult<DeviceRegisteredPayload>> RegisterDeviceAsync(
         DeviceRegisterPayload payload,
         CancellationToken cancellationToken)
     {
-        if (!IsValidPrincipalId(payload.DeviceId, "dev_") ||
-            string.IsNullOrWhiteSpace(payload.Name) || payload.Name.Length > 200 ||
-            !IsValidPublicKey(payload.PublicKey))
+        if (!IsValidDeviceRegistration(payload))
         {
             return ServiceResult<DeviceRegisteredPayload>.Failure(
                 "DEVICE_REGISTRATION_INVALID",
@@ -159,6 +175,12 @@ public sealed class AuthService
 
     private static bool IsValidPrincipalId(string value, string prefix) =>
         value.StartsWith(prefix, StringComparison.Ordinal) && value.Length is >= 12 and <= 80;
+
+    private static bool IsValidDeviceRegistration(DeviceRegisterPayload payload) =>
+        IsValidPrincipalId(payload.DeviceId, "dev_") &&
+        !string.IsNullOrWhiteSpace(payload.Name) &&
+        payload.Name.Length <= 200 &&
+        IsValidPublicKey(payload.PublicKey);
 
     private static bool IsValidPublicKey(string value)
     {

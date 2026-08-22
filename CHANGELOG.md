@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 - 2026-08-23
+
+- Split first-time device enrollment throttling from idempotent registration by an already-known device identity.
+- Added a reconnect-burst regression covering twelve complete register-and-authenticate cycles from one Agent identity.
+- Prevented normal Agent backoff from exhausting the hourly new-device enrollment allowance and staying offline.
+
 ## 0.4.0 - 2026-08-23
 
 - Added Desktop-compatible task ordering through `recencyAt` instead of stale `updatedAt` timestamps.

@@ -145,7 +145,7 @@ public sealed class RelayWebSocketHandler
         RelayEnvelope envelope,
         CancellationToken cancellationToken)
     {
-        if (!_rateLimiter.TryAcquire($"register:{peer.RemoteAddress}", 10, TimeSpan.FromHours(1)))
+        if (!_rateLimiter.TryAcquire($"register-attempt:{peer.RemoteAddress}", 120, TimeSpan.FromMinutes(1)))
         {
             SendError(peer, envelope.RequestId, "RATE_LIMITED", "Device registration rate limit exceeded.");
             return;
@@ -155,6 +155,24 @@ public sealed class RelayWebSocketHandler
         if (envelope.DeviceId is not null && envelope.DeviceId != payload.DeviceId)
         {
             SendError(peer, envelope.RequestId, "DEVICE_ID_MISMATCH", "Device ID mismatch.");
+            return;
+        }
+
+        var isRegisteredIdentity = await _auth.IsRegisteredDeviceIdentityAsync(
+            payload,
+            cancellationToken).ConfigureAwait(false);
+        var registrationAllowed = isRegisteredIdentity
+            ? _rateLimiter.TryAcquire(
+                $"register-device:{peer.RemoteAddress}:{payload.DeviceId}",
+                30,
+                TimeSpan.FromMinutes(1))
+            : _rateLimiter.TryAcquire($"register-new:{peer.RemoteAddress}", 10, TimeSpan.FromHours(1));
+        if (!registrationAllowed)
+        {
+            var message = isRegisteredIdentity
+                ? "Device reconnect rate limit exceeded."
+                : "New device enrollment rate limit exceeded.";
+            SendError(peer, envelope.RequestId, "RATE_LIMITED", message);
             return;
         }
 

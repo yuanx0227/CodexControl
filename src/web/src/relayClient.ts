@@ -270,7 +270,7 @@ export class RelayClient {
     this.send(
       createEnvelope(
         MessageType.authHello,
-        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.4.0' },
+        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.4.1' },
         { requestId: this.authRequestId, controllerId: identity.controllerId },
       ),
     );

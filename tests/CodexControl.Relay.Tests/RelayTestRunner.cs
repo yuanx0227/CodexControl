@@ -39,17 +39,19 @@ internal static class RelayTestRunner
             var baseUri = ResolveBaseUri(app);
 
             await TestHealthAsync(baseUri).ConfigureAwait(false);
+            await TestRegisteredDeviceReconnectBurstAsync(baseUri).ConfigureAwait(false);
             await TestPairingRoutingAndReconnectAsync(app, baseUri).ConfigureAwait(false);
             await TestSecurityBoundariesAsync(app).ConfigureAwait(false);
             await TestMultiDeviceIsolationAsync(app).ConfigureAwait(false);
             await VerifyDatabaseAsync(app).ConfigureAwait(false);
 
             Console.WriteLine("PASS Relay_Health_Migration");
+            Console.WriteLine("PASS Relay_RegisteredDevice_ReconnectBurst");
             Console.WriteLine("PASS Relay_Auth_Pairing_Routing_Reconnect");
             Console.WriteLine("PASS Relay_Expiry_AttemptLimit_ChallengeReplay");
             Console.WriteLine("PASS Relay_OneController_ThreeDevices_Isolation");
             Console.WriteLine("PASS Relay_Persistence_NoPlaintextCode");
-            Console.WriteLine("RESULT total=5 passed=5 failed=0");
+            Console.WriteLine("RESULT total=6 passed=6 failed=0");
             return 0;
         }
         catch (Exception exception)
@@ -77,6 +79,24 @@ internal static class RelayTestRunner
         using var http = new HttpClient();
         using var response = await http.GetAsync(new Uri(baseUri, "/healthz")).ConfigureAwait(false);
         Assert(response.StatusCode == HttpStatusCode.OK, "healthz should return 200");
+    }
+
+    private static async Task TestRegisteredDeviceReconnectBurstAsync(Uri baseUri)
+    {
+        using var deviceKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var deviceId = string.Concat("dev_", Guid.NewGuid().ToString("N"));
+        for (var attempt = 0; attempt < 12; attempt++)
+        {
+            await using var device = new RelayTestClient(
+                PrincipalRole.Device,
+                deviceId,
+                "Reconnect Probe",
+                deviceKey);
+            await device.ConnectAsync(baseUri).ConfigureAwait(false);
+            await device.RegisterAndAuthenticateDeviceAsync().ConfigureAwait(false);
+            await device.CloseAsync().ConfigureAwait(false);
+            await Task.Delay(100).ConfigureAwait(false);
+        }
     }
 
     private static async Task TestPairingRoutingAndReconnectAsync(WebApplication app, Uri baseUri)
@@ -366,7 +386,11 @@ internal static class RelayTestRunner
         var pairingService = app.Services.GetRequiredService<PairingService>();
         var factory = app.Services.GetRequiredService<IDbContextFactory<RelayDbContext>>();
         await using var db = await factory.CreateDbContextAsync().ConfigureAwait(false);
-        var deviceId = await db.Devices.Select(value => value.Id).SingleAsync().ConfigureAwait(false);
+        var deviceId = await db.Devices
+            .OrderBy(value => value.Id)
+            .Select(value => value.Id)
+            .FirstAsync()
+            .ConfigureAwait(false);
 
         var expired = await pairingService.CreateAsync(deviceId, CancellationToken.None).ConfigureAwait(false);
         Assert(expired.Succeeded, "expired-code setup should create a session");

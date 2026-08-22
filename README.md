@@ -19,14 +19,14 @@ MVP 代码与自动化闭环已经实现：
 - app-server stdio JSON-RPC 与 localhost WebSocket Proxy；
 - 真实 `codex --remote` TUI；
 - Thread/Turn/Item/Approval 状态与 Domain Event；
-- 真实 `thread/list` 历史、按项目折叠、按需 `thread/read` 消息读取、创建新 Thread、恢复历史 Thread 并启动真实 Turn；
+- 真实 `thread/list` 历史、能力探测式分页消息读取（当前 Desktop 自动兼容回退）、多会话项目折叠、项目内新建 Thread、恢复历史 Thread 并启动真实 Turn；
 - Steer、Interrupt、Command/File Approval first-valid-response-wins；
 - Windows DPAPI + ECDSA P-256 Device Identity；
 - Controller Web Crypto + IndexedDB 非导出私钥；
 - 六位码、三分钟 TTL、五次证明失败限制、一次性销毁；
 - Challenge/Signature 长期认证与 replay 防护；
 - Relay WSS、SQLite/EF Core Migration、Presence、Snapshot Cache、权限与审计元数据；
-- React/Vite PWA：配对、设备列表、同身份多标签稳定连接、项目折叠、真实会话消息、新建/恢复任务、时间线、Steer、Interrupt、Approval、解除配对；
+- React/Vite PWA：配对、设备列表、同身份多标签稳定连接、单会话直显/多会话项目折叠、项目内新建、固定 Composer、真实会话消息、Steer、Interrupt、Approval、解除配对；
 - ChatGPT 风格的信息架构：桌面会话侧栏、中央消息流、底部上下文输入框和移动端抽屉；
 - Docker Compose、nginx HTTPS/WSS、SQLite volume；
 - Fake、真实 Relay、真实浏览器和真实 Codex 测试。
@@ -100,7 +100,7 @@ CONNECT & 'C:\Users\...\CodexControl\codex-runtimes\desktop\...\codex.exe' --rem
 
 生产环境删除 `--allow-insecure-relay` 并使用可信 `wss://`。
 
-配对后无需先打开本地 TUI：手机设备详情会直接读取电脑的 Codex 历史，并按工作目录折叠成项目。选择历史会话会按需读取持久化的用户/助手消息，也可恢复并发送新任务；“新建会话”要求填写电脑上的绝对项目路径和第一条任务。若已有 Turn 正在运行，只能 Steer 或停止，结束后才能创建/恢复其他会话。
+配对后无需先打开本地 TUI：手机设备详情会直接读取电脑的 Codex 历史。只有同一工作目录包含多个会话时才显示可折叠项目，单会话直接显示；项目右侧的“＋”会预填该项目绝对路径。历史读取优先分页，当前 Desktop 未实现分页方法时自动使用受限兼容路径；Agent 暂时离线时等待其自动恢复。若已有 Turn 正在运行，只能 Steer 或停止，结束后才能创建/恢复其他会话。
 
 ## Docker 部署
 

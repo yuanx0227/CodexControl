@@ -14,6 +14,8 @@ async function installRelayMock(page: Page, options: {
   activeTurn?: boolean;
   disconnectThreadListOnce?: boolean;
   disconnectThreadReadOnce?: boolean;
+  extraSingletonProjects?: number;
+  historyEntryCount?: number;
 } = {}) {
   const activeTurn = options.activeTurn ?? true;
   const captured: CapturedMessage[] = [];
@@ -21,6 +23,57 @@ async function installRelayMock(page: Page, options: {
   let connectionCount = 0;
   let disconnectThreadListOnce = options.disconnectThreadListOnce ?? false;
   let disconnectThreadReadOnce = options.disconnectThreadReadOnce ?? false;
+  const threadSummaries = [{
+    threadId: 'thr-history-1',
+    name: '历史测试会话',
+    preview: '继续修复登录模块',
+    cwd: 'D:\\Projects\\MES',
+    createdAt: 1_730_831_111,
+    updatedAt: 1_730_832_222,
+    status: 'notLoaded',
+    sourceKind: 'appServer',
+  }, {
+    threadId: 'thr-history-2',
+    name: 'MES 第二个会话',
+    preview: '检查 MES 接口',
+    cwd: 'D:\\Projects\\MES',
+    createdAt: 1_730_811_111,
+    updatedAt: 1_730_812_222,
+    status: 'notLoaded',
+    sourceKind: 'appServer',
+  }, {
+    threadId: 'thr-vision-1',
+    name: 'Vision 相机会话',
+    preview: '检查相机连接',
+    cwd: 'D:\\Projects\\Vision',
+    createdAt: 1_730_711_111,
+    updatedAt: 1_730_712_222,
+    status: 'notLoaded',
+    sourceKind: 'appServer',
+  }];
+  for (let index = 0; index < (options.extraSingletonProjects ?? 0); index += 1) {
+    threadSummaries.push({
+      threadId: `thr-singleton-${index}`,
+      name: `Singleton 会话 ${index}`,
+      preview: `单会话项目 ${index}`,
+      cwd: `D:\\Projects\\Singleton-${index}`,
+      createdAt: 1_730_600_000 - index,
+      updatedAt: 1_730_700_000 - index,
+      status: 'notLoaded',
+      sourceKind: 'appServer',
+    });
+  }
+  const historyEntries = Array.from({ length: options.historyEntryCount ?? 2 }, (_, index) => ({
+    itemId: `history-item-${index}`,
+    turnId: `history-turn-${Math.floor(index / 2)}`,
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    text: index === 0
+      ? '请继续修复登录模块'
+      : index === 1
+        ? '登录模块的历史修复已经完成'
+        : `历史长消息 ${index} ${'内容'.repeat(180)}`,
+    phase: index % 2 === 0 ? undefined : 'final_answer',
+  }));
   let route: WebSocketRoute | undefined;
   await page.routeWebSocket('**/ws/controller', (socket) => {
     connectionCount += 1;
@@ -91,34 +144,7 @@ async function installRelayMock(page: Page, options: {
           socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
             status: 'succeeded',
             result: {
-              threads: [{
-                threadId: 'thr-history-1',
-                name: '历史测试会话',
-                preview: '继续修复登录模块',
-                cwd: 'D:\\Projects\\MES',
-                createdAt: 1_730_831_111,
-                updatedAt: 1_730_832_222,
-                status: 'notLoaded',
-                sourceKind: 'appServer',
-              }, {
-                threadId: 'thr-history-2',
-                name: 'MES 第二个会话',
-                preview: '检查 MES 接口',
-                cwd: 'D:\\Projects\\MES',
-                createdAt: 1_730_811_111,
-                updatedAt: 1_730_812_222,
-                status: 'notLoaded',
-                sourceKind: 'appServer',
-              }, {
-                threadId: 'thr-vision-1',
-                name: 'Vision 相机会话',
-                preview: '检查相机连接',
-                cwd: 'D:\\Projects\\Vision',
-                createdAt: 1_730_711_111,
-                updatedAt: 1_730_712_222,
-                status: 'notLoaded',
-                sourceKind: 'appServer',
-              }],
+              threads: threadSummaries,
             },
           }, envelope.deviceId, envelope.controllerId)));
           break;
@@ -135,18 +161,7 @@ async function installRelayMock(page: Page, options: {
               threadId,
               name: threadId === 'thr-history-1' ? '历史测试会话' : '测试会话',
               cwd: threadId === 'thr-vision-1' ? 'D:\\Projects\\Vision' : 'D:\\Projects\\MES',
-              entries: [{
-                itemId: `${threadId}-user`,
-                turnId: `${threadId}-turn`,
-                role: 'user',
-                text: '请继续修复登录模块',
-              }, {
-                itemId: `${threadId}-assistant`,
-                turnId: `${threadId}-turn`,
-                role: 'assistant',
-                text: '登录模块的历史修复已经完成',
-                phase: 'final_answer',
-              }],
+              entries: historyEntries,
               truncated: false,
             },
           }, envelope.deviceId, envelope.controllerId)));
@@ -278,13 +293,20 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
 
   await page.getByRole('button', { name: '打开会话栏' }).click();
   const mesProject = page.getByRole('button', { name: 'MES，2 个会话' });
-  const visionProject = page.getByRole('button', { name: 'Vision，1 个会话' });
   await expect(mesProject).toHaveAttribute('aria-expanded', 'true');
-  await expect(visionProject).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.getByRole('button', { name: /^Vision 相机会话/u })).toHaveCount(0);
-  await visionProject.click();
+  await expect(page.getByRole('button', { name: 'Vision，1 个会话' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /^Vision 相机会话/u })).toBeVisible();
-  await visionProject.click();
+  await page.getByRole('button', { name: '在 MES 中新建会话' }).click();
+  await expect(page.getByLabel('电脑上的项目目录')).toHaveValue('D:\\Projects\\MES');
+  await page.getByLabel('第一条任务').fill('在 MES 项目中新建任务');
+  await page.getByRole('button', { name: '创建会话并开始' }).click();
+  await expect.poll(() => relay.captured.some((message) =>
+    message.type === 'control.thread.start'
+      && message.payload.cwd === 'D:\\Projects\\MES'
+      && message.payload.text === '在 MES 项目中新建任务',
+  )).toBe(true);
+
+  await page.getByRole('button', { name: '打开会话栏' }).click();
   const historyButton = page.getByRole('button', { name: /^历史测试会话/u });
   await expect(historyButton).toBeVisible();
   await historyButton.click();
@@ -295,7 +317,7 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
   )).toBe(true);
   await page.getByRole('button', { name: '打开会话栏' }).click();
   await page.getByRole('button', { name: '新建任务' }).click();
-  await page.getByLabel('电脑上的项目目录').fill('D:\Projects\NewProject');
+  await page.getByLabel('电脑上的项目目录').fill('D:\\Projects\\NewProject');
   await page.getByLabel('第一条任务').fill('从手机创建真实会话');
   await page.getByRole('button', { name: '创建会话并开始' }).click();
   await expect.poll(() => relay.captured.some((message) =>
@@ -332,6 +354,47 @@ test('recovers history after controller disconnects during list and read', async
     .toBeGreaterThanOrEqual(2);
   await expect.poll(() => relay.captured.filter((message) => message.type === 'control.thread.read').length)
     .toBeGreaterThanOrEqual(2);
+});
+
+test('keeps sidebar scroll and composer visible with long history', async ({ page }) => {
+  await installRelayMock(page, {
+    activeTurn: false,
+    extraSingletonProjects: 30,
+    historyEntryCount: 160,
+  });
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+
+  const navigation = page.getByRole('navigation', { name: '历史会话' });
+  const sidebarMetrics = await navigation.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(sidebarMetrics.scrollHeight).toBeGreaterThan(sidebarMetrics.clientHeight);
+  await navigation.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(page.getByRole('button', { name: /^Singleton 会话 29/u })).toBeVisible();
+
+  await page.getByRole('button', { name: /^历史测试会话/u }).click();
+  await expect(page.getByText(/历史长消息 159/u)).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByLabel('继续历史会话的任务')).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const root = document.documentElement;
+    const feed = document.querySelector<HTMLElement>('.chat-feed');
+    const dock = document.querySelector<HTMLElement>('.composer-dock');
+    return {
+      horizontalOverflow: root.scrollWidth - root.clientWidth,
+      verticalPageOverflow: root.scrollHeight - root.clientHeight,
+      feedScrollable: Boolean(feed && feed.scrollHeight > feed.clientHeight),
+      composerBottom: dock?.getBoundingClientRect().bottom ?? Number.POSITIVE_INFINITY,
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(layout.horizontalOverflow).toBeLessThanOrEqual(0);
+  expect(layout.verticalPageOverflow).toBeLessThanOrEqual(0);
+  expect(layout.feedScrollable).toBe(true);
+  expect(layout.composerBottom).toBeLessThanOrEqual(layout.viewportHeight + 1);
 });
 
 test('pairing success toast clears automatically', async ({ page }) => {

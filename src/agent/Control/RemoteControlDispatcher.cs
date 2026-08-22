@@ -14,6 +14,8 @@ public sealed record ControlDispatchResult(
 
 public sealed class RemoteControlDispatcher
 {
+    private const int ThreadItemsPageSize = 100;
+    private const int MaxThreadItemPages = 20;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan HistoryTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ThreadMutationTimeout = TimeSpan.FromSeconds(30);
@@ -137,17 +139,71 @@ public sealed class RemoteControlDispatcher
 
         try
         {
-            var result = await _bridge.SendRequestAsync(
+            var metadataResult = await _bridge.SendRequestAsync(
                 "thread/read",
-                new { threadId, includeTurns = true },
+                new { threadId, includeTurns = false },
                 HistoryTimeout,
                 cancellationToken).ConfigureAwait(false);
-            var history = CodexThreadHistoryMapper.Map(result);
-            if (!string.Equals(history.ThreadId, threadId, StringComparison.Ordinal))
+            var metadata = CodexThreadHistoryMapper.MapMetadata(metadataResult);
+            if (!string.Equals(metadata.ThreadId, threadId, StringComparison.Ordinal))
             {
                 throw new JsonException("thread/read 返回了不匹配的 thread.id。");
             }
 
+            var entriesNewestFirst = new List<CodexThreadHistoryEntryPayload>();
+            string? cursor = null;
+            var textWasTruncated = false;
+            for (var pageNumber = 0;
+                 pageNumber < MaxThreadItemPages && entriesNewestFirst.Count < CodexThreadHistoryMapper.EntryLimit;
+                 pageNumber++)
+            {
+                JsonElement pageResult;
+                try
+                {
+                    pageResult = await _bridge.SendRequestAsync(
+                        "thread/items/list",
+                        new
+                        {
+                            threadId,
+                            turnId = (string?)null,
+                            cursor,
+                            limit = ThreadItemsPageSize,
+                            sortDirection = "desc",
+                        },
+                        HistoryTimeout,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (AppServerRpcException exception) when (
+                    pageNumber == 0 && IsThreadItemsListUnavailable(exception))
+                {
+                    var legacyResult = await _bridge.SendRequestAsync(
+                        "thread/read",
+                        new { threadId, includeTurns = true },
+                        HistoryTimeout,
+                        cancellationToken).ConfigureAwait(false);
+                    var legacyHistory = CodexThreadHistoryMapper.MapLegacy(legacyResult);
+                    if (!string.Equals(legacyHistory.ThreadId, threadId, StringComparison.Ordinal))
+                    {
+                        throw new JsonException("thread/read 返回了不匹配的 thread.id。");
+                    }
+
+                    return Success(JsonSerializer.SerializeToElement(legacyHistory, RelayJson.Options));
+                }
+                var page = CodexThreadHistoryMapper.MapItemsPage(pageResult);
+                entriesNewestFirst.AddRange(page.Entries);
+                textWasTruncated |= page.TextWasTruncated;
+                cursor = page.NextCursor;
+                if (cursor is null)
+                {
+                    break;
+                }
+            }
+
+            var history = CodexThreadHistoryMapper.Build(
+                metadata,
+                entriesNewestFirst,
+                hasMore: cursor is not null,
+                textWasTruncated);
             return Success(JsonSerializer.SerializeToElement(
                 history,
                 RelayJson.Options));
@@ -413,6 +469,11 @@ public sealed class RemoteControlDispatcher
 
     private static bool IsValidThreadId(string value) =>
         !string.IsNullOrWhiteSpace(value) && value.Length <= 256;
+
+    private static bool IsThreadItemsListUnavailable(AppServerRpcException exception) =>
+        exception.Method == "thread/items/list" &&
+        (exception.Code == -32601 ||
+         exception.Message.Contains("not supported", StringComparison.OrdinalIgnoreCase));
 
     private static string? GetString(JsonElement value, string propertyName, int maximumLength)
     {

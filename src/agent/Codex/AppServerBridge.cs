@@ -18,6 +18,7 @@ public sealed class AppServerBridge : IAsyncDisposable
     private static readonly TimeSpan InitializeTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan WriterShutdownTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ProcessShutdownTimeout = TimeSpan.FromSeconds(5);
+    private const int MinimumAppServerMessageBytes = 128 * 1024 * 1024;
 
     private readonly AgentOptions _options;
     private readonly AgentLog _log;
@@ -404,7 +405,9 @@ public sealed class AppServerBridge : IAsyncDisposable
                     break;
                 }
 
-                if (Encoding.UTF8.GetByteCount(line) > _options.MaxMessageBytes)
+                if (Encoding.UTF8.GetByteCount(line) > Math.Max(
+                        _options.MaxMessageBytes,
+                        MinimumAppServerMessageBytes))
                 {
                     throw new AgentException(
                         AgentErrorCodes.AppServerProtocolError,

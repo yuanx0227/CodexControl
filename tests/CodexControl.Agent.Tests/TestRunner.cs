@@ -793,6 +793,21 @@ internal static class TestRunner
                 threadReadPayload.Entries[1].Text == "登录模块已修复",
                 "thread/read should normalize real user and assistant history");
 
+            var legacyThreadRead = await dispatcher.ReadThreadAsync(
+                "thr-history-legacy",
+                CancellationToken.None).ConfigureAwait(false);
+            var legacyThreadReadResult = legacyThreadRead.Result ??
+                                         throw new InvalidOperationException("legacy thread/read result is missing");
+            var legacyThreadReadPayload = legacyThreadReadResult.Deserialize<CodexThreadReadResultPayload>(
+                                              RelayJson.Options) ??
+                                          throw new InvalidOperationException("legacy thread/read payload should deserialize");
+            Assert(
+                legacyThreadRead.Succeeded &&
+                legacyThreadReadPayload.Entries.Count == 2 &&
+                legacyThreadReadPayload.Entries[0].Role == "user" &&
+                legacyThreadReadPayload.Entries[1].Role == "assistant",
+                "unsupported thread/items/list should fall back to bounded legacy thread/read");
+
             var created = await dispatcher.StartThreadAsync(
                 testRoot,
                 "start a real remote task",

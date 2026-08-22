@@ -217,8 +217,9 @@ SQLite volume 在 Relay restart 前后 SHA-256 一致，证明持久化 volume �
 | J Relay restart | PASS | Docker restart + SQLite volume hash |
 | K 一个 Controller 三台 PC | PASS | Relay three-device pairing/list 测试 |
 | L 未配对 Controller 隔离 | PASS | zero-device isolation + permission test |
-| M 手机查看真实历史 | PASS | `control.thread.list -> thread/list`、`control.thread.read -> thread/read`、项目折叠 + 浏览器/真实 Codex 测试 |
-| N 手机新建/恢复会话 | PASS | `thread/start/resume -> turn/start` + 浏览器/真实 Codex 测试 |
+| M 手机查看真实历史 | PASS | `thread/list`、分页能力探测与当前 Desktop 兼容回退、单会话直显/多会话折叠 + 浏览器/真实 Codex 测试 |
+| N 手机新建/恢复会话 | PASS | 项目内预填 cwd、`thread/start/resume -> turn/start` + 浏览器/真实 Codex 测试 |
+| O Agent 自恢复 | PASS | app-server 子进程故障注入后 Agent PID 保持、proxy/Relay 自动恢复 |
 
 ## 8. 安全扫描
 

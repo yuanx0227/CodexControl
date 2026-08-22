@@ -470,7 +470,7 @@ Device 调用 `thread/list`，按 `recency_at desc` 查询 `cli`、`vscode`、`a
 }
 ```
 
-Device 调用 `thread/read`，并强制 `includeTurns=true`。Agent 只把用户消息与助手消息映射为受限 Domain Payload，单条最多 20000 字符、最多保留最近 200 条且总正文受限；命令输出、Diff、源码及原始 JSON-RPC 不进入响应。该请求要求 `view` 权限，Relay 只转发并按既有短时幂等机制处理，不写入业务数据库。
+Device 先调用 `thread/read(includeTurns=false)` 读取元数据，再尝试按 `sortDirection=desc` 分页调用 `thread/items/list`，直到得到最近 200 条用户/助手消息或达到分页上限。当前 Codex Desktop 若返回方法未支持，则兼容回退 `thread/read(includeTurns=true)`；Agent 允许最多 128MB 的本机 app-server 单行响应，但对外仍执行同样的最近 200 条、单条 20000 字符和总正文限制。命令输出、Diff、源码及原始 JSON-RPC 不进入 Domain Payload。该请求要求 `view` 权限，Relay 只转发并按既有短时幂等机制处理，不写入业务数据库。
 
 新建会话并立即启动真实 Turn：
 

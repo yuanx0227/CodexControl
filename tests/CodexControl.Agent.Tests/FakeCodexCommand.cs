@@ -134,7 +134,31 @@ internal static class FakeCodexCommand
 
             if (method == "thread/read")
             {
-                var threadId = message.GetProperty("params").GetProperty("threadId").GetString();
+                var readParams = message.GetProperty("params");
+                var threadId = readParams.GetProperty("threadId").GetString();
+                var includeTurns = readParams.TryGetProperty("includeTurns", out var includeTurnsValue) &&
+                                   includeTurnsValue.ValueKind == JsonValueKind.True;
+                var turns = includeTurns
+                    ? """
+                      [{
+                        "id":"turn-history-1",
+                        "status":"completed",
+                        "items":[
+                          {
+                            "id":"item-history-user",
+                            "type":"userMessage",
+                            "content":[{"type":"text","text":"修复登录模块"}]
+                          },
+                          {
+                            "id":"item-history-agent",
+                            "type":"agentMessage",
+                            "text":"登录模块已修复",
+                            "phase":"final_answer"
+                          }
+                        ]
+                      }]
+                      """
+                    : "[]";
                 using var resultDocument = JsonDocument.Parse(
                     $$"""
                     {
@@ -142,26 +166,49 @@ internal static class FakeCodexCommand
                         "id":{{JsonSerializer.Serialize(threadId)}},
                         "name":"历史测试会话",
                         "cwd":"D:\\Projects\\MES",
-                        "turns":[
-                          {
-                            "id":"turn-history-1",
-                            "status":"completed",
-                            "items":[
-                              {
-                                "id":"item-history-user",
-                                "type":"userMessage",
-                                "content":[{"type":"text","text":"修复登录模块"}]
-                              },
-                              {
-                                "id":"item-history-agent",
-                                "type":"agentMessage",
-                                "text":"登录模块已修复",
-                                "phase":"final_answer"
-                              }
-                            ]
-                          }
-                        ]
+                        "turns":{{turns}}
                       }
+                    }
+                    """);
+                await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (method == "thread/items/list")
+            {
+                var threadId = message.GetProperty("params").GetProperty("threadId").GetString();
+                if (threadId == "thr-history-legacy")
+                {
+                    await WriteAsync(JsonRpcProtocol.BuildErrorResponse(
+                        id,
+                        -32601,
+                        "thread/items/list is not supported yet")).ConfigureAwait(false);
+                    continue;
+                }
+
+                using var resultDocument = JsonDocument.Parse("""
+                    {
+                      "data":[
+                        {
+                          "turnId":"turn-history-1",
+                          "item":{
+                            "id":"item-history-agent",
+                            "type":"agentMessage",
+                            "text":"登录模块已修复",
+                            "phase":"final_answer"
+                          }
+                        },
+                        {
+                          "turnId":"turn-history-1",
+                          "item":{
+                            "id":"item-history-user",
+                            "type":"userMessage",
+                            "content":[{"type":"text","text":"修复登录模块"}]
+                          }
+                        }
+                      ],
+                      "nextCursor":null
                     }
                     """);
                 await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))

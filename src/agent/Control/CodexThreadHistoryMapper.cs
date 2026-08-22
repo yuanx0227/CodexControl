@@ -3,29 +3,83 @@ using CodexControl.Protocol;
 
 namespace CodexControl.Agent.Control;
 
+internal sealed record CodexThreadMetadata(
+    string ThreadId,
+    string? Name,
+    string? Cwd);
+
+internal sealed record CodexThreadItemsPage(
+    IReadOnlyList<CodexThreadHistoryEntryPayload> Entries,
+    string? NextCursor,
+    bool TextWasTruncated);
+
 internal static class CodexThreadHistoryMapper
 {
-    private const int MaxEntries = 200;
+    public const int EntryLimit = 200;
+
     private const int MaxEntryTextLength = 20_000;
     private const int MaxTotalTextLength = 200_000;
     private const int MaxThreadIdLength = 256;
     private const int MaxNameLength = 256;
     private const int MaxCwdLength = 2_048;
 
-    public static CodexThreadReadResultPayload Map(JsonElement result)
+    public static CodexThreadMetadata MapMetadata(JsonElement result)
     {
         if (!result.TryGetProperty("thread", out var thread) || thread.ValueKind != JsonValueKind.Object)
         {
             throw new JsonException("thread/read 未返回 thread 对象。");
         }
 
-        var threadId = GetRequiredString(thread, "id", MaxThreadIdLength, "thread/read 未返回 thread.id。");
+        return new CodexThreadMetadata(
+            GetRequiredString(thread, "id", MaxThreadIdLength, "thread/read 未返回 thread.id。"),
+            GetOptionalString(thread, "name", MaxNameLength),
+            GetOptionalString(thread, "cwd", MaxCwdLength));
+    }
+
+    public static CodexThreadItemsPage MapItemsPage(JsonElement result)
+    {
+        if (!result.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+        {
+            throw new JsonException("thread/items/list 未返回 data 数组。");
+        }
+
+        var entries = new List<CodexThreadHistoryEntryPayload>();
+        var textWasTruncated = false;
+        foreach (var itemEntry in data.EnumerateArray())
+        {
+            if (itemEntry.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var turnId = GetOptionalString(itemEntry, "turnId", MaxThreadIdLength);
+            if (string.IsNullOrWhiteSpace(turnId) ||
+                !itemEntry.TryGetProperty("item", out var item) ||
+                !TryMapEntry(item, turnId, out var entry, out var entryWasTruncated))
+            {
+                continue;
+            }
+
+            textWasTruncated |= entryWasTruncated;
+            entries.Add(entry);
+        }
+
+        return new CodexThreadItemsPage(
+            entries,
+            GetOptionalString(result, "nextCursor", 2_048),
+            textWasTruncated);
+    }
+
+    public static CodexThreadReadResultPayload MapLegacy(JsonElement result)
+    {
+        var metadata = MapMetadata(result);
+        var thread = result.GetProperty("thread");
         if (!thread.TryGetProperty("turns", out var turns) || turns.ValueKind != JsonValueKind.Array)
         {
             throw new JsonException("thread/read 未返回 thread.turns 数组。");
         }
 
-        var candidates = new List<CodexThreadHistoryEntryPayload>();
+        var entriesChronological = new List<CodexThreadHistoryEntryPayload>();
         var textWasTruncated = false;
         foreach (var turn in turns.EnumerateArray())
         {
@@ -50,31 +104,46 @@ internal static class CodexThreadHistoryMapper
                 }
 
                 textWasTruncated |= entryWasTruncated;
-                candidates.Add(entry);
+                entriesChronological.Add(entry);
             }
         }
 
-        var retained = new List<CodexThreadHistoryEntryPayload>(Math.Min(candidates.Count, MaxEntries));
+        entriesChronological.Reverse();
+        return Build(
+            metadata,
+            entriesChronological,
+            hasMore: false,
+            textWasTruncated);
+    }
+
+    public static CodexThreadReadResultPayload Build(
+        CodexThreadMetadata metadata,
+        IReadOnlyList<CodexThreadHistoryEntryPayload> entriesNewestFirst,
+        bool hasMore,
+        bool textWasTruncated)
+    {
+        var retainedNewestFirst = new List<CodexThreadHistoryEntryPayload>(
+            Math.Min(entriesNewestFirst.Count, EntryLimit));
         var totalTextLength = 0;
-        for (var index = candidates.Count - 1; index >= 0 && retained.Count < MaxEntries; index--)
+        foreach (var candidate in entriesNewestFirst)
         {
-            var candidate = candidates[index];
-            if (retained.Count > 0 && totalTextLength + candidate.Text.Length > MaxTotalTextLength)
+            if (retainedNewestFirst.Count >= EntryLimit ||
+                (retainedNewestFirst.Count > 0 && totalTextLength + candidate.Text.Length > MaxTotalTextLength))
             {
                 break;
             }
 
-            retained.Add(candidate);
+            retainedNewestFirst.Add(candidate);
             totalTextLength += candidate.Text.Length;
         }
 
-        retained.Reverse();
+        retainedNewestFirst.Reverse();
         return new CodexThreadReadResultPayload(
-            threadId,
-            GetOptionalString(thread, "name", MaxNameLength),
-            GetOptionalString(thread, "cwd", MaxCwdLength),
-            retained,
-            textWasTruncated || retained.Count < candidates.Count);
+            metadata.ThreadId,
+            metadata.Name,
+            metadata.Cwd,
+            retainedNewestFirst,
+            hasMore || textWasTruncated || retainedNewestFirst.Count < entriesNewestFirst.Count);
     }
 
     private static bool TryMapEntry(

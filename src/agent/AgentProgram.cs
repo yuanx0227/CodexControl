@@ -12,6 +12,8 @@ namespace CodexControl.Agent;
 
 public static class AgentProgram
 {
+    private static readonly int[] AppServerRestartSeconds = [1, 2, 5, 10, 30];
+
     public static async Task<int> RunAsync(string[] args)
     {
         AgentOptions options;
@@ -75,45 +77,115 @@ public static class AgentProgram
             };
             Console.CancelKeyPress += cancelHandler;
 
-            var state = new CodexStateManager();
-            await using var bridge = new AppServerBridge(options, log, state);
-            await using var proxy = new LocalCodexProxyServer(options, bridge, log);
-            DeviceIdentity? identity = null;
-            RelayClient? relayClient = null;
-
+            DeviceIdentity? identity = options.RelayUrl is null
+                ? null
+                : DeviceIdentity.LoadOrCreate(options.DataDirectory, options.DeviceName);
+            var restartAttempt = 0;
+            var pairingCreated = false;
             try
             {
-                await bridge.StartAsync(shutdown.Token).ConfigureAwait(false);
-                await proxy.StartAsync(shutdown.Token).ConfigureAwait(false);
-
-                if (options.RelayUrl is not null)
+                while (!shutdown.IsCancellationRequested)
                 {
-                    identity = DeviceIdentity.LoadOrCreate(options.DataDirectory, options.DeviceName);
-                    var dispatcher = new RemoteControlDispatcher(bridge, state);
-                    relayClient = new RelayClient(options, identity, state, bridge, dispatcher, log);
-                    relayClient.Start();
-                    Console.WriteLine($"DEVICE {identity.DeviceId} {identity.Name}");
-                    Console.WriteLine($"RELAY {options.RelayUrl}");
-                    if (options.CreatePairing)
+                    var sessionStartedAt = DateTimeOffset.UtcNow;
+                    var state = new CodexStateManager();
+                    await using var bridge = new AppServerBridge(options, log, state);
+                    await using var proxy = new LocalCodexProxyServer(options, bridge, log);
+                    RelayClient? relayClient = null;
+                    try
                     {
-                        await relayClient.WaitUntilAuthenticatedAsync(shutdown.Token).ConfigureAwait(false);
-                        var pairing = await relayClient.CreatePairingAsync(shutdown.Token).ConfigureAwait(false);
-                        Console.WriteLine($"PAIRING_CODE {pairing.Code} EXPIRES_AT {pairing.ExpiresAt}");
+                        await bridge.StartAsync(shutdown.Token).ConfigureAwait(false);
+                        await proxy.StartAsync(shutdown.Token).ConfigureAwait(false);
+
+                        if (options.RelayUrl is not null && identity is not null)
+                        {
+                            var dispatcher = new RemoteControlDispatcher(bridge, state);
+                            relayClient = new RelayClient(options, identity, state, bridge, dispatcher, log);
+                            relayClient.Start();
+                            Console.WriteLine($"DEVICE {identity.DeviceId} {identity.Name}");
+                            Console.WriteLine($"RELAY {options.RelayUrl}");
+                            if (options.CreatePairing && !pairingCreated)
+                            {
+                                await relayClient.WaitUntilAuthenticatedAsync(shutdown.Token).ConfigureAwait(false);
+                                var pairing = await relayClient.CreatePairingAsync(shutdown.Token).ConfigureAwait(false);
+                                pairingCreated = true;
+                                Console.WriteLine($"PAIRING_CODE {pairing.Code} EXPIRES_AT {pairing.ExpiresAt}");
+                            }
+                        }
+
+                        Console.WriteLine($"READY {proxy.WebSocketUri}");
+                        Console.WriteLine(
+                            $"CONNECT & {ToPowerShellLiteral(options.CodexPath)} --remote " +
+                            ToPowerShellLiteral(proxy.WebSocketUri.ToString()));
+
+                        var cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, shutdown.Token);
+                        var completed = await Task.WhenAny(cancellationTask, bridge.Completion).ConfigureAwait(false);
+                        if (!ReferenceEquals(completed, bridge.Completion) || shutdown.IsCancellationRequested)
+                        {
+                            return 0;
+                        }
+
+                        var exitCode = await bridge.Completion.ConfigureAwait(false);
+                        log.Error("app_server_session_failed", $"app-server exited unexpectedly; code={exitCode}");
                     }
-                }
+                    catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+                    {
+                        return 0;
+                    }
+                    catch (Exception exception)
+                    {
+                        log.Error("agent_session_failed", "Agent session failed and will be restarted", exception);
+                    }
+                    finally
+                    {
+                        if (relayClient is not null)
+                        {
+                            try
+                            {
+                                await relayClient.DisposeAsync().ConfigureAwait(false);
+                            }
+                            catch (Exception exception)
+                            {
+                                log.Error("relay_stop_failed", "Relay client shutdown failed", exception);
+                            }
+                        }
 
-                Console.WriteLine($"READY {proxy.WebSocketUri}");
-                Console.WriteLine(
-                    $"CONNECT & {ToPowerShellLiteral(options.CodexPath)} --remote " +
-                    ToPowerShellLiteral(proxy.WebSocketUri.ToString()));
+                        try
+                        {
+                            using var proxyStopTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                            await proxy.StopAsync(proxyStopTimeout.Token).ConfigureAwait(false);
+                        }
+                        catch (Exception exception)
+                        {
+                            log.Error("local_proxy_stop_failed", "local proxy shutdown failed", exception);
+                        }
 
-                var cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, shutdown.Token);
-                var completed = await Task.WhenAny(cancellationTask, bridge.Completion).ConfigureAwait(false);
-                if (ReferenceEquals(completed, bridge.Completion) && !shutdown.IsCancellationRequested)
-                {
-                    var exitCode = await bridge.Completion.ConfigureAwait(false);
-                    log.Error("agent_stopping", $"app-server exited unexpectedly; code={exitCode}");
-                    return 5;
+                        try
+                        {
+                            using var bridgeStopTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                            await bridge.StopAsync(bridgeStopTimeout.Token).ConfigureAwait(false);
+                        }
+                        catch (Exception exception)
+                        {
+                            log.Error("app_server_stop_failed", "app-server bridge shutdown failed", exception);
+                        }
+                    }
+
+                    if (shutdown.IsCancellationRequested)
+                    {
+                        return 0;
+                    }
+
+                    if (DateTimeOffset.UtcNow - sessionStartedAt > TimeSpan.FromMinutes(1))
+                    {
+                        restartAttempt = 0;
+                    }
+
+                    var restartSeconds = AppServerRestartSeconds[
+                        Math.Min(restartAttempt++, AppServerRestartSeconds.Length - 1)];
+                    log.Warning(
+                        "agent_session_restarting",
+                        $"Restarting app-server session in {restartSeconds}s; attempt={restartAttempt}");
+                    await Task.Delay(TimeSpan.FromSeconds(restartSeconds), shutdown.Token).ConfigureAwait(false);
                 }
 
                 return 0;
@@ -124,43 +196,9 @@ public static class AgentProgram
             }
             finally
             {
-                if (relayClient is not null)
-                {
-                    try
-                    {
-                        await relayClient.DisposeAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception exception)
-                    {
-                        log.Error("relay_stop_failed", "Relay client shutdown failed", exception);
-                    }
-                }
-
                 identity?.Dispose();
-                try
-                {
-                    using var proxyStopTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                    await proxy.StopAsync(proxyStopTimeout.Token).ConfigureAwait(false);
-                }
-                catch (Exception exception)
-                {
-                    log.Error("local_proxy_stop_failed", "local proxy shutdown failed", exception);
-                }
-
-                try
-                {
-                    using var bridgeStopTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                    await bridge.StopAsync(bridgeStopTimeout.Token).ConfigureAwait(false);
-                }
-                catch (Exception exception)
-                {
-                    log.Error("app_server_stop_failed", "app-server bridge shutdown failed", exception);
-                }
-                finally
-                {
-                    Console.CancelKeyPress -= cancelHandler;
-                    log.Info("shutdown", "CodexControlAgent stopped");
-                }
+                Console.CancelKeyPress -= cancelHandler;
+                log.Info("shutdown", "CodexControlAgent stopped");
             }
         }
         catch (AgentException exception)

@@ -122,7 +122,9 @@ Snapshot 是不可变对象并带单调 `revision`。Domain Event 只包含移�
 
 ```text
 历史: control.thread.list -> thread/list
-读取: control.thread.read -> thread/read(includeTurns=true) -> 受限用户/助手消息
+读取: control.thread.read -> thread/read(includeTurns=false) + thread/items/list(desc, paged)
+                            -> 当前 Desktop 不支持时回退 thread/read(includeTurns=true)
+                            -> 受限用户/助手消息
 新建: control.thread.start -> thread/start -> turn/start
 恢复: control.thread.resume -> thread/resume -> turn/start
 ```
@@ -248,6 +250,8 @@ Relay 不持久化完整事件流，只保存最新 Snapshot 和必要审计元�
 - 解除配对；
 - Service Worker 与 Manifest。
 
+侧栏只对包含两个及以上会话的项目显示折叠标题；单会话直接显示。每个已识别 `cwd` 都提供项目内新建入口。侧栏、消息流和 Composer 分属独立布局行，长历史不能扩张页面或把 Composer 推出视口。
+
 同一浏览器身份可以同时打开多个标签页。Relay 为 Device 保留单连接替换语义，但按 `controllerId + connectionId` 保存全部 Controller 页面；Presence、Snapshot、Event 和 Control Result 会发送给该 Controller 身份的所有活动页面，未发起请求的页面会忽略不匹配的 `requestId`。
 
 重载或手机挂起恢复：
@@ -269,6 +273,8 @@ Agent backoff：
 ```
 
 Controller backoff 为 `0.5s, 1s, 2s, 5s, 10s...`。两者都带 0–20% jitter。重连后先认证并恢复设备列表；只读历史列表/正文请求会等待 Controller 与 Agent 都恢复在线后自动重试。Device 使用 connection replacement fencing，Controller 多标签互不替换。
+
+若 Codex app-server 异常退出，Agent 进程不退出；它按 `1s, 2s, 5s, 10s, 30s...` 重建 app-server bridge、localhost proxy 与 Relay session。历史正文优先使用 `thread/items/list` 分页；当前 Desktop 返回 `not supported yet` 时回退完整 `thread/read`，但 app-server 内部消息上限提升到 128MB，随后仍只映射受限的最近用户/助手消息。
 
 ## 9. 部署
 

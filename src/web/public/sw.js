@@ -1,4 +1,4 @@
-const CACHE = 'codex-control-v4';
+const CACHE = 'codex-control-v5';
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (event) => {

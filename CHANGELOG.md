@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 - 2026-08-23
+
+- Preferred metadata plus paged `thread/items/list` reads, with a bounded high-capacity `thread/read` fallback for current Desktop builds that report the paged method as unsupported.
+- Kept the standalone Agent alive and rebuilt its bridge, proxy and Relay session after an unexpected app-server exit.
+- Rendered one-session projects directly while retaining folding only for projects with multiple sessions.
+- Made sidebar and message scrolling independent and kept the Composer inside the viewport for long histories.
+- Added per-project new-session actions that prefill the project's absolute working directory.
+- Deferred history reads while the Agent is offline and resumed them automatically when the device returns.
+
 ## 0.3.1 - 2026-08-23
 
 - Fixed same-controller browser tabs repeatedly replacing and aborting each other's Relay connections.

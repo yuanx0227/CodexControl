@@ -300,6 +300,7 @@ function DeviceWorkspace({
 
   const refreshThreads = useCallback(async () => {
     setHistoryLoading(true);
+    setError(undefined);
     try {
       const history = await client.listThreads(device.deviceId);
       setThreads(history.threads);
@@ -329,8 +330,12 @@ function DeviceWorkspace({
   }, [client, device.deviceId]);
 
   useEffect(() => {
+    if (!authenticated || !device.online) {
+      setHistoryLoading(false);
+      return;
+    }
     void refreshThreads();
-  }, [refreshThreads]);
+  }, [authenticated, device.online, refreshThreads]);
 
   useEffect(() => {
     if (!snapshot?.activeThreadId) return;
@@ -352,9 +357,15 @@ function DeviceWorkspace({
       return;
     }
 
+    if (!authenticated || !device.online) {
+      setThreadHistoryLoading(false);
+      setThreadHistoryError(undefined);
+      return;
+    }
+
     setThreadHistory(undefined);
     void loadThread(selectedThreadId);
-  }, [loadThread, newSession, selectedThreadId]);
+  }, [authenticated, device.online, loadThread, newSession, selectedThreadId]);
 
   useEffect(() => {
     if (snapshot?.status === 'Interrupted') setInterrupting(false);
@@ -366,15 +377,18 @@ function DeviceWorkspace({
   useEffect(() => {
     if (threadGroups.length === 0) return;
     setExpandedProjects((current) => {
-      const available = new Set(threadGroups.map((group) => group.key));
+      const collapsible = threadGroups.filter((group) => group.threads.length > 1);
+      const available = new Set(collapsible.map((group) => group.key));
       const next = new Set([...current].filter((key) => available.has(key)));
-      if (next.size === 0) next.add(threadGroups[0].key);
+      if (next.size === 0 && collapsible.length > 0) next.add(collapsible[0].key);
       return setsEqual(current, next) ? current : next;
     });
   }, [threadGroups]);
 
   useEffect(() => {
     if (!selectedThread) return;
+    const group = threadGroups.find((candidate) => candidate.threads.includes(selectedThread));
+    if (!group || group.threads.length < 2) return;
     const key = projectKey(selectedThread.cwd);
     setExpandedProjects((current) => {
       if (current.has(key)) return current;
@@ -382,7 +396,7 @@ function DeviceWorkspace({
       next.add(key);
       return next;
     });
-  }, [selectedThread]);
+  }, [selectedThread, threadGroups]);
 
   const hasActiveTurn = Boolean(snapshot?.activeThreadId && snapshot.activeTurnId);
   const conversationId = snapshot?.activeThreadId ?? selectedThreadId;
@@ -430,13 +444,14 @@ function DeviceWorkspace({
     setError(undefined);
   }
 
-  function beginNewSession() {
+  function beginNewSession(cwd?: string) {
     threadHistoryRequest.current += 1;
     setSelectedThreadId(undefined);
     setNewSession(true);
     setSidebarOpen(false);
     setLocalEntries([]);
     setComposer('');
+    setNewCwd(cwd?.trim() || snapshot?.currentProject || '');
     setError(undefined);
     setThreadHistory(undefined);
     setThreadHistoryLoading(false);
@@ -489,7 +504,9 @@ function DeviceWorkspace({
   const title = hasActiveTurn
     ? selectedThread?.name ?? threadHistory?.name ?? selectedThread?.preview ?? '当前任务'
     : newSession
-      ? '新任务'
+      ? newCwd.trim()
+        ? `新任务 · ${projectName(newCwd)}`
+        : '新任务'
       : selectedThread?.name ?? threadHistory?.name ?? selectedThread?.preview ?? 'Codex';
   const composerLabel = hasActiveTurn
     ? 'Steer 当前任务'
@@ -514,7 +531,12 @@ function DeviceWorkspace({
           <button className="icon-button mobile-close" aria-label="关闭会话栏" onClick={() => setSidebarOpen(false)}>×</button>
           <button className="sidebar-back" onClick={onBack}>‹ 所有电脑</button>
         </div>
-        <button className="new-chat-button" onClick={beginNewSession}>
+        <button
+          className="new-chat-button"
+          disabled={hasActiveTurn}
+          title={hasActiveTurn ? '请先停止当前任务' : '新建任务'}
+          onClick={() => beginNewSession()}
+        >
           <span>＋</span> 新建任务
         </button>
         <div className="sidebar-label">
@@ -522,27 +544,64 @@ function DeviceWorkspace({
           <button className="icon-button" aria-label="刷新历史" disabled={historyLoading} onClick={() => void refreshThreads()}>↻</button>
         </div>
         <nav className="conversation-nav" aria-label="历史会话">
-          {historyLoading ? <p className="sidebar-empty">正在读取历史…</p> : threads.length === 0 ? (
+          {historyLoading ? <p className="sidebar-empty">正在读取历史…</p> : !device.online ? (
+            <p className="sidebar-empty">电脑 Agent 离线，恢复后自动加载</p>
+          ) : threads.length === 0 ? (
             <p className="sidebar-empty">暂无历史会话</p>
           ) : threadGroups.map((group, index) => {
+            if (group.threads.length === 1) {
+              const thread = group.threads[0];
+              return (
+                <div className="singleton-thread-row" key={group.key}>
+                  <button
+                    className={`conversation-link ${selectedThreadId === thread.threadId && !newSession ? 'active' : ''}`}
+                    onClick={() => selectThread(thread.threadId)}
+                  >
+                    <span>{thread.name ?? thread.preview ?? '未命名会话'}</span>
+                    <small>{group.name} · {formatThreadTime(thread.updatedAt ?? thread.createdAt)}</small>
+                  </button>
+                  {group.cwd && (
+                    <button
+                      className="project-new-button"
+                      aria-label={`在 ${group.name} 中新建会话`}
+                      title={`在 ${group.name} 中新建会话`}
+                      disabled={hasActiveTurn}
+                      onClick={() => beginNewSession(group.cwd)}
+                    >＋</button>
+                  )}
+                </div>
+              );
+            }
+
             const expanded = expandedProjects.has(group.key);
             const regionId = `project-threads-${index}`;
             return (
               <section className="project-group" key={group.key}>
-                <button
-                  className="project-toggle"
-                  aria-expanded={expanded}
-                  aria-controls={regionId}
-                  aria-label={`${group.name}，${group.threads.length} 个会话`}
-                  onClick={() => toggleProject(group.key)}
-                >
-                  <span className={`project-chevron ${expanded ? 'expanded' : ''}`}>›</span>
-                  <span className="project-copy">
-                    <strong>{group.name}</strong>
-                    <small>{group.cwd ?? '未识别工作目录'}</small>
-                  </span>
-                  <span className="project-count">{group.threads.length}</span>
-                </button>
+                <div className="project-heading">
+                  <button
+                    className="project-toggle"
+                    aria-expanded={expanded}
+                    aria-controls={regionId}
+                    aria-label={`${group.name}，${group.threads.length} 个会话`}
+                    onClick={() => toggleProject(group.key)}
+                  >
+                    <span className={`project-chevron ${expanded ? 'expanded' : ''}`}>›</span>
+                    <span className="project-copy">
+                      <strong>{group.name}</strong>
+                      <small>{group.cwd ?? '未识别工作目录'}</small>
+                    </span>
+                    <span className="project-count">{group.threads.length}</span>
+                  </button>
+                  {group.cwd && (
+                    <button
+                      className="project-new-button"
+                      aria-label={`在 ${group.name} 中新建会话`}
+                      title={`在 ${group.name} 中新建会话`}
+                      disabled={hasActiveTurn}
+                      onClick={() => beginNewSession(group.cwd)}
+                    >＋</button>
+                  )}
+                </div>
                 {expanded && (
                   <div className="project-thread-list" id={regionId}>
                     {group.threads.map((thread) => (
@@ -577,7 +636,9 @@ function DeviceWorkspace({
           <button className="icon-button menu-button" aria-label="打开会话栏" onClick={() => setSidebarOpen(true)}>☰</button>
           <div className="chat-title">
             <strong>{title}</strong>
-            <span>{selectedThread?.cwd ?? threadHistory?.cwd ?? snapshot?.currentProject ?? device.name}</span>
+            <span>{newSession
+              ? newCwd.trim() || '选择电脑上的项目目录'
+              : selectedThread?.cwd ?? threadHistory?.cwd ?? snapshot?.currentProject ?? device.name}</span>
           </div>
           <StatusPill online={device.online} status={interrupting ? 'Interrupting' : snapshot?.status} />
           <button
@@ -605,7 +666,13 @@ function DeviceWorkspace({
         )}
 
         <section className="chat-feed" aria-label="会话内容" ref={chatFeed}>
-          {threadHistoryLoading && selectedThreadId && !newSession ? (
+          {!device.online && selectedThreadId && !newSession ? (
+            <div className="history-loading" role="status">
+              <span className="history-spinner" />
+              <strong>正在等待电脑 Agent</strong>
+              <p>Agent 恢复在线后会自动加载这个会话。</p>
+            </div>
+          ) : threadHistoryLoading && selectedThreadId && !newSession ? (
             <div className="history-loading" role="status">
               <span className="history-spinner" />
               <strong>正在加载会话</strong>

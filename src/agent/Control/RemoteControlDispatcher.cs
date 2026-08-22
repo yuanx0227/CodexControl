@@ -126,6 +126,50 @@ public sealed class RemoteControlDispatcher
         }
     }
 
+    public async Task<ControlDispatchResult> ReadThreadAsync(
+        string threadId,
+        CancellationToken cancellationToken)
+    {
+        if (!IsValidThreadId(threadId))
+        {
+            return Failure("THREAD_NOT_FOUND", "历史会话 ID 无效。");
+        }
+
+        try
+        {
+            var result = await _bridge.SendRequestAsync(
+                "thread/read",
+                new { threadId, includeTurns = true },
+                HistoryTimeout,
+                cancellationToken).ConfigureAwait(false);
+            var history = CodexThreadHistoryMapper.Map(result);
+            if (!string.Equals(history.ThreadId, threadId, StringComparison.Ordinal))
+            {
+                throw new JsonException("thread/read 返回了不匹配的 thread.id。");
+            }
+
+            return Success(JsonSerializer.SerializeToElement(
+                history,
+                RelayJson.Options));
+        }
+        catch (JsonException exception)
+        {
+            return Failure("APP_SERVER_PROTOCOL_ERROR", exception.Message);
+        }
+        catch (AppServerRpcException exception)
+        {
+            return Failure("THREAD_READ_FAILED", exception.Message);
+        }
+        catch (TimeoutException exception)
+        {
+            return Failure("APP_SERVER_TIMEOUT", exception.Message);
+        }
+        catch (AgentException exception)
+        {
+            return Failure(exception.Code, exception.Message);
+        }
+    }
+
     public Task<ControlDispatchResult> StartThreadAsync(
         string cwd,
         string text,

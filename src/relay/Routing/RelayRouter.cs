@@ -170,6 +170,7 @@ public sealed class RelayRouter
             case RelayMessageTypes.ControlInterrupt:
             case RelayMessageTypes.ControlApproval:
             case RelayMessageTypes.ControlThreadList:
+            case RelayMessageTypes.ControlThreadRead:
             case RelayMessageTypes.ControlThreadStart:
             case RelayMessageTypes.ControlThreadResume:
                 await RouteControlAsync(peer, envelope, cancellationToken).ConfigureAwait(false);
@@ -213,6 +214,7 @@ public sealed class RelayRouter
             RelayMessageTypes.ControlInterrupt => pairing.InterruptPermission,
             RelayMessageTypes.ControlApproval => pairing.ApprovalPermission,
             RelayMessageTypes.ControlThreadList => pairing.ViewPermission,
+            RelayMessageTypes.ControlThreadRead => pairing.ViewPermission,
             RelayMessageTypes.ControlThreadStart => pairing.SteerPermission,
             RelayMessageTypes.ControlThreadResume => pairing.SteerPermission,
             _ => false,

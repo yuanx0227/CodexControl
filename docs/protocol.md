@@ -101,6 +101,7 @@ control.steer
 control.interrupt
 control.approval
 control.thread.list
+control.thread.read
 control.thread.start
 control.thread.resume
 control.result
@@ -455,6 +456,20 @@ Relay 默认不持久化完整 `data`；审计只保留 event kind、标识符�
 ```
 
 Device 调用 `thread/list`，按 `recency_at desc` 查询 `cli`、`vscode`、`appServer`、`exec` 和 `unknown` 来源。返回值只规范化 `threadId/name/preview/cwd/createdAt/updatedAt/status/sourceKind`，Relay 不持久化正文。该请求要求 `view` 权限。
+
+读取指定历史会话：
+
+```json
+{
+  "type": "control.thread.read",
+  "requestId": "ctlreq_01J...",
+  "deviceId": "dev_01J...",
+  "controllerId": "ctl_01J...",
+  "payload": { "threadId": "thr_123" }
+}
+```
+
+Device 调用 `thread/read`，并强制 `includeTurns=true`。Agent 只把用户消息与助手消息映射为受限 Domain Payload，单条最多 20000 字符、最多保留最近 200 条且总正文受限；命令输出、Diff、源码及原始 JSON-RPC 不进入响应。该请求要求 `view` 权限，Relay 只转发并按既有短时幂等机制处理，不写入业务数据库。
 
 新建会话并立即启动真实 Turn：
 

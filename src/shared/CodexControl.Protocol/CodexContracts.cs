@@ -26,6 +26,20 @@ public sealed record CodexThreadListResultPayload(
     IReadOnlyList<CodexThreadSummaryPayload> Threads,
     string? NextCursor);
 
+public sealed record CodexThreadHistoryEntryPayload(
+    string ItemId,
+    string TurnId,
+    string Role,
+    string Text,
+    string? Phase);
+
+public sealed record CodexThreadReadResultPayload(
+    string ThreadId,
+    string? Name,
+    string? Cwd,
+    IReadOnlyList<CodexThreadHistoryEntryPayload> Entries,
+    bool Truncated);
+
 public sealed record CodexThreadActionResultPayload(
     string ThreadId,
     string TurnId);

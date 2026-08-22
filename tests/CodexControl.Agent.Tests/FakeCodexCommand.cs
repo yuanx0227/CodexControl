@@ -132,6 +132,43 @@ internal static class FakeCodexCommand
                 continue;
             }
 
+            if (method == "thread/read")
+            {
+                var threadId = message.GetProperty("params").GetProperty("threadId").GetString();
+                using var resultDocument = JsonDocument.Parse(
+                    $$"""
+                    {
+                      "thread":{
+                        "id":{{JsonSerializer.Serialize(threadId)}},
+                        "name":"历史测试会话",
+                        "cwd":"D:\\Projects\\MES",
+                        "turns":[
+                          {
+                            "id":"turn-history-1",
+                            "status":"completed",
+                            "items":[
+                              {
+                                "id":"item-history-user",
+                                "type":"userMessage",
+                                "content":[{"type":"text","text":"修复登录模块"}]
+                              },
+                              {
+                                "id":"item-history-agent",
+                                "type":"agentMessage",
+                                "text":"登录模块已修复",
+                                "phase":"final_answer"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                    """);
+                await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
+                    .ConfigureAwait(false);
+                continue;
+            }
+
             if (method == "thread/start")
             {
                 using var resultDocument = JsonDocument.Parse("""

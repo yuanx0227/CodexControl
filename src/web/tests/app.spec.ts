@@ -77,10 +77,53 @@ async function installRelayMock(page: Page, options: { activeTurn?: boolean } = 
                 updatedAt: 1_730_832_222,
                 status: 'notLoaded',
                 sourceKind: 'appServer',
+              }, {
+                threadId: 'thr-history-2',
+                name: 'MES 第二个会话',
+                preview: '检查 MES 接口',
+                cwd: 'D:\\Projects\\MES',
+                createdAt: 1_730_811_111,
+                updatedAt: 1_730_812_222,
+                status: 'notLoaded',
+                sourceKind: 'appServer',
+              }, {
+                threadId: 'thr-vision-1',
+                name: 'Vision 相机会话',
+                preview: '检查相机连接',
+                cwd: 'D:\\Projects\\Vision',
+                createdAt: 1_730_711_111,
+                updatedAt: 1_730_712_222,
+                status: 'notLoaded',
+                sourceKind: 'appServer',
               }],
             },
           }, envelope.deviceId, envelope.controllerId)));
           break;
+        case 'control.thread.read': {
+          const threadId = String(envelope.payload.threadId);
+          socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
+            status: 'succeeded',
+            result: {
+              threadId,
+              name: threadId === 'thr-history-1' ? '历史测试会话' : '测试会话',
+              cwd: threadId === 'thr-vision-1' ? 'D:\\Projects\\Vision' : 'D:\\Projects\\MES',
+              entries: [{
+                itemId: `${threadId}-user`,
+                turnId: `${threadId}-turn`,
+                role: 'user',
+                text: '请继续修复登录模块',
+              }, {
+                itemId: `${threadId}-assistant`,
+                turnId: `${threadId}-turn`,
+                role: 'assistant',
+                text: '登录模块的历史修复已经完成',
+                phase: 'final_answer',
+              }],
+              truncated: false,
+            },
+          }, envelope.deviceId, envelope.controllerId)));
+          break;
+        }
         case 'control.thread.start':
           socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
             status: 'succeeded',
@@ -153,8 +196,7 @@ async function pair(page: Page) {
   await expect(page.getByRole('heading', { name: '连接你的电脑' })).toBeVisible();
   await page.getByLabel('六位配对码').fill('123456');
   await page.getByRole('button', { name: '配对', exact: true }).click();
-  await expect(page.getByRole('heading', { name: '开发电脑' })).toBeVisible();
-  await expect(page.getByText('DEV-PC-01')).toBeVisible();
+  await expect(page.getByRole('button', { name: '打开 DEV-PC-01' })).toBeVisible();
 }
 
 test('pairs with a signed proof and renders the recovered device snapshot', async ({ page }) => {
@@ -169,7 +211,7 @@ test('pairs with a signed proof and renders the recovered device snapshot', asyn
   expect(String(claim?.payload.proofSignature).length).toBeGreaterThan(80);
 
   await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
-  await expect(page.getByText('D:\\Projects\\MES', { exact: true })).toBeVisible();
+  await expect(page.getByRole('main').getByText('D:\\Projects\\MES', { exact: true })).toBeVisible();
   await expect(page.getByText('dotnet test')).toBeVisible();
   await expect(page.getByText('正在修复失败测试')).toBeVisible();
 });
@@ -206,8 +248,23 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
   await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
 
   await page.getByRole('button', { name: '打开会话栏' }).click();
+  const mesProject = page.getByRole('button', { name: 'MES，2 个会话' });
+  const visionProject = page.getByRole('button', { name: 'Vision，1 个会话' });
+  await expect(mesProject).toHaveAttribute('aria-expanded', 'true');
+  await expect(visionProject).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('button', { name: /^Vision 相机会话/u })).toHaveCount(0);
+  await visionProject.click();
+  await expect(page.getByRole('button', { name: /^Vision 相机会话/u })).toBeVisible();
+  await visionProject.click();
   const historyButton = page.getByRole('button', { name: /^历史测试会话/u });
   await expect(historyButton).toBeVisible();
+  await historyButton.click();
+  await expect(page.getByText('请继续修复登录模块', { exact: true })).toBeVisible();
+  await expect(page.getByText('登录模块的历史修复已经完成', { exact: true })).toBeVisible();
+  await expect.poll(() => relay.captured.some((message) =>
+    message.type === 'control.thread.read' && message.payload.threadId === 'thr-history-1',
+  )).toBe(true);
+  await page.getByRole('button', { name: '打开会话栏' }).click();
   await page.getByRole('button', { name: '新建任务' }).click();
   await page.getByLabel('电脑上的项目目录').fill('D:\Projects\NewProject');
   await page.getByLabel('第一条任务').fill('从手机创建真实会话');

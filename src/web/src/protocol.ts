@@ -80,6 +80,22 @@ export interface CodexThreadListResult {
   nextCursor?: string;
 }
 
+export interface CodexThreadHistoryEntry {
+  itemId: string;
+  turnId: string;
+  role: 'user' | 'assistant';
+  text: string;
+  phase?: string;
+}
+
+export interface CodexThreadReadResult {
+  threadId: string;
+  name?: string;
+  cwd?: string;
+  entries: CodexThreadHistoryEntry[];
+  truncated: boolean;
+}
+
 export interface CodexThreadActionResult {
   threadId: string;
   turnId: string;

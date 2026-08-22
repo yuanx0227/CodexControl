@@ -17,6 +17,7 @@ import {
   type CodexSnapshot,
   type CodexThreadActionResult,
   type CodexThreadListResult,
+  type CodexThreadReadResult,
   type ControlResult,
   type DeviceListResult,
   type DeviceSummary,
@@ -144,14 +145,41 @@ export class RelayClient {
     return this.control(MessageType.controlApproval, deviceId, { approvalId, decision });
   }
 
-  async listThreads(deviceId: string, cursor?: string): Promise<CodexThreadListResult> {
-    const result = await this.control<CodexThreadListResult>(
-      MessageType.controlThreadList,
+  async listThreads(deviceId: string): Promise<CodexThreadListResult> {
+    const threads: CodexThreadListResult['threads'] = [];
+    const seenThreadIds = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < 5; page += 1) {
+      const result = await this.control<CodexThreadListResult>(
+        MessageType.controlThreadList,
+        deviceId,
+        { limit: 100, cursor },
+        45_000,
+      );
+      if (!result.result) throw new Error('Agent 未返回历史会话');
+      for (const thread of result.result.threads) {
+        if (!seenThreadIds.has(thread.threadId)) {
+          seenThreadIds.add(thread.threadId);
+          threads.push(thread);
+        }
+      }
+
+      cursor = result.result.nextCursor;
+      if (!cursor) return { threads };
+    }
+
+    return { threads, nextCursor: cursor };
+  }
+
+  async readThread(deviceId: string, threadId: string): Promise<CodexThreadReadResult> {
+    const result = await this.control<CodexThreadReadResult>(
+      MessageType.controlThreadRead,
       deviceId,
-      { limit: 50, cursor },
+      { threadId },
       45_000,
     );
-    if (!result.result) throw new Error('Agent 未返回历史会话');
+    if (!result.result) throw new Error('Agent 未返回会话内容');
+    if (result.result.threadId !== threadId) throw new Error('Agent 返回了不匹配的会话内容');
     return result.result;
   }
 
@@ -226,7 +254,7 @@ export class RelayClient {
     this.send(
       createEnvelope(
         MessageType.authHello,
-        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.2.0' },
+        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.3.0' },
         { requestId: this.authRequestId, controllerId: identity.controllerId },
       ),
     );

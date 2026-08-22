@@ -189,8 +189,9 @@ internal static class RelayTestRunner
 
         foreach (var remoteSessionControl in new (string Type, object Payload)[]
                  {
-                     (RelayMessageTypes.ControlThreadList, new ThreadListControlPayload()),
-                     (RelayMessageTypes.ControlThreadStart, new ThreadStartControlPayload("D:\\Projects\\MES", "new task")),
+                      (RelayMessageTypes.ControlThreadList, new ThreadListControlPayload()),
+                      (RelayMessageTypes.ControlThreadRead, new ThreadReadControlPayload("thr-history")),
+                      (RelayMessageTypes.ControlThreadStart, new ThreadStartControlPayload("D:\\Projects\\MES", "new task")),
                      (RelayMessageTypes.ControlThreadResume, new ThreadResumeControlPayload("thr-history", "continue task")),
                  })
         {

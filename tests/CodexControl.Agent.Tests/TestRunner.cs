@@ -675,6 +675,21 @@ internal static class TestRunner
                 () => state.Snapshot.ActiveTurnId is null,
                 TimeSpan.FromSeconds(30)).ConfigureAwait(false);
             activeTurnId = null;
+
+            var read = await dispatcher.ReadThreadAsync(
+                createdThreadId,
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(
+                read.Succeeded && read.Result is not null,
+                $"real thread/read should succeed: {read.ErrorCode} {read.ErrorMessage}");
+            var readResult = read.Result ?? throw new InvalidOperationException("real thread/read result missing");
+            var readPayload = readResult.Deserialize<CodexThreadReadResultPayload>(RelayJson.Options) ??
+                              throw new InvalidOperationException("real thread/read payload should deserialize");
+            Assert(
+                readPayload.ThreadId == createdThreadId &&
+                readPayload.Entries.Any(entry => entry.Role == "user" && entry.Text.Contains("REMOTE_CREATE_OK", StringComparison.Ordinal)) &&
+                readPayload.Entries.Any(entry => entry.Role == "assistant" && entry.Text.Contains("REMOTE_RESUME_OK", StringComparison.Ordinal)),
+                "real thread/read should return persisted user and assistant messages");
         }
         finally
         {
@@ -762,6 +777,21 @@ internal static class TestRunner
                 historyPayload.Threads[0].ThreadId == "thr-history-1" &&
                 historyPayload.Threads[0].SourceKind == "appServer",
                 "history metadata should be preserved");
+
+            var threadRead = await dispatcher.ReadThreadAsync(
+                "thr-history-1",
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(threadRead.Succeeded && threadRead.Result is not null, "thread/read should load stored messages");
+            var threadReadResult = threadRead.Result ?? throw new InvalidOperationException("thread/read result is missing");
+            var threadReadPayload = threadReadResult.Deserialize<CodexThreadReadResultPayload>(RelayJson.Options) ??
+                                    throw new InvalidOperationException("thread/read payload should deserialize");
+            Assert(
+                threadReadPayload.Entries.Count == 2 &&
+                threadReadPayload.Entries[0].Role == "user" &&
+                threadReadPayload.Entries[0].Text == "修复登录模块" &&
+                threadReadPayload.Entries[1].Role == "assistant" &&
+                threadReadPayload.Entries[1].Text == "登录模块已修复",
+                "thread/read should normalize real user and assistant history");
 
             var created = await dispatcher.StartThreadAsync(
                 testRoot,

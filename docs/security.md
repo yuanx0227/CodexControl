@@ -82,7 +82,7 @@ approval
 
 解除配对后新 Control 立即 `PERMISSION_DENIED`。Control Result 必须匹配 Relay 已路由的 `requestId + deviceId + controllerId`，Device 不能向任意 Controller 伪造 Result。
 
-- `control.thread.list` 必须具有 `view`；
+- `control.thread.list` 与 `control.thread.read` 必须具有 `view`；
 - `control.thread.start` 与 `control.thread.resume` 必须具有 `steer`；
 - 新会话目录必须是 Device 上真实存在的绝对路径；
 - 创建/恢复强制 `approvalPolicy=untrusted` 与 `workspace-write` sandbox；

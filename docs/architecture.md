@@ -13,7 +13,7 @@ Codex Control 是 Codex Session 的控制面，不是 OpenAI 身份或模型代�
 - 将 Codex JSON-RPC 规范化为 Snapshot/Domain Event；
 - 通过自托管 Relay 连接多个 Device 和 Controller；
 - 执行 Steer、Interrupt、Approval 和状态恢复。
-- 列出本机 Codex 历史、创建 Thread、恢复历史 Thread 并启动真实 Turn。
+- 列出本机 Codex 历史、按项目折叠、读取历史消息、创建 Thread、恢复历史 Thread 并启动真实 Turn。
 
 它不负责：
 
@@ -122,11 +122,12 @@ Snapshot 是不可变对象并带单调 `revision`。Domain Event 只包含移�
 
 ```text
 历史: control.thread.list -> thread/list
+读取: control.thread.read -> thread/read(includeTurns=true) -> 受限用户/助手消息
 新建: control.thread.start -> thread/start -> turn/start
 恢复: control.thread.resume -> thread/resume -> turn/start
 ```
 
-历史查询使用 `view` 权限；创建/恢复使用 `steer` 权限。远程创建/恢复强制 `approvalPolicy=untrusted` 与 `sandbox=workspace-write`，且同一 Agent 同时只允许一个远程活动 Turn。
+历史列表与历史消息读取使用 `view` 权限；创建/恢复使用 `steer` 权限。远程创建/恢复强制 `approvalPolicy=untrusted` 与 `sandbox=workspace-write`，且同一 Agent 同时只允许一个远程活动 Turn。PWA 按规范化 `cwd` 分组，历史正文只在选中 Thread 时按需读取。
 
 Interrupt RPC 成功只表示接受请求。UI 只有收到 `turn/completed status=interrupted` 后才显示 Interrupted。
 

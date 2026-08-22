@@ -19,6 +19,9 @@ public sealed record ThreadListControlPayload(
     int Limit = 50,
     string? Cursor = null);
 
+public sealed record ThreadReadControlPayload(
+    string ThreadId);
+
 public sealed record ThreadStartControlPayload(
     string Cwd,
     string Text);

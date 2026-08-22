@@ -150,7 +150,7 @@ Playwright mobile Edge/Chromium + iPhone WebKit：
 ```text
 PASS signed pairing proof + recovered snapshot
 PASS steer + interrupt + exact approval decision
-PASS real history + thread start + thread resume
+PASS real history list/read + thread start + thread resume
 PASS pairing toast automatic dismissal
 PASS mobile layout + manifest + service worker
 PASS real Relay + browser Web Crypto + reload authentication recovery (Chromium + WebKit)
@@ -216,7 +216,7 @@ SQLite volume 在 Relay restart 前后 SHA-256 一致，证明持久化 volume �
 | J Relay restart | PASS | Docker restart + SQLite volume hash |
 | K 一个 Controller 三台 PC | PASS | Relay three-device pairing/list 测试 |
 | L 未配对 Controller 隔离 | PASS | zero-device isolation + permission test |
-| M 手机查看真实历史 | PASS | `control.thread.list -> thread/list` + 浏览器/真实 Codex 测试 |
+| M 手机查看真实历史 | PASS | `control.thread.list -> thread/list`、`control.thread.read -> thread/read`、项目折叠 + 浏览器/真实 Codex 测试 |
 | N 手机新建/恢复会话 | PASS | `thread/start/resume -> turn/start` + 浏览器/真实 Codex 测试 |
 
 ## 8. 安全扫描

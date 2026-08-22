@@ -294,6 +294,7 @@ public sealed class RelayClient : IAsyncDisposable
                 case RelayMessageTypes.ControlInterrupt:
                 case RelayMessageTypes.ControlApproval:
                 case RelayMessageTypes.ControlThreadList:
+                case RelayMessageTypes.ControlThreadRead:
                 case RelayMessageTypes.ControlThreadStart:
                 case RelayMessageTypes.ControlThreadResume:
                     await HandleControlAsync(envelope, cancellationToken).ConfigureAwait(false);
@@ -392,6 +393,14 @@ public sealed class RelayClient : IAsyncDisposable
                         result = await _dispatcher.ListThreadsAsync(
                             payload.Limit,
                             payload.Cursor,
+                            cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
+                case RelayMessageTypes.ControlThreadRead:
+                    {
+                        var payload = envelope.ReadPayload<ThreadReadControlPayload>();
+                        result = await _dispatcher.ReadThreadAsync(
+                            payload.ThreadId,
                             cancellationToken).ConfigureAwait(false);
                         break;
                     }

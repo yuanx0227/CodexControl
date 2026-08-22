@@ -24,6 +24,7 @@ export const MessageType = {
   controlInterrupt: 'control.interrupt',
   controlApproval: 'control.approval',
   controlThreadList: 'control.thread.list',
+  controlThreadRead: 'control.thread.read',
   controlThreadStart: 'control.thread.start',
   controlThreadResume: 'control.thread.resume',
   controlResult: 'control.result',

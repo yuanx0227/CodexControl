@@ -176,6 +176,36 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
                             RelayJson.Options),
                         cancellationToken).ConfigureAwait(false);
                     break;
+                case RelayMessageTypes.ControlThreadRead:
+                    {
+                        var threadId = envelope.ReadPayload<ThreadReadControlPayload>().ThreadId;
+                        await SendControlResultAsync(
+                            envelope,
+                            ControlResultStatus.Succeeded,
+                            JsonSerializer.SerializeToElement(
+                                new CodexThreadReadResultPayload(
+                                    threadId,
+                                    "系统历史会话",
+                                    "D:\\Projects\\SystemTest",
+                                    [
+                                        new CodexThreadHistoryEntryPayload(
+                                            "item-history-user",
+                                            "turn-history-system",
+                                            "user",
+                                            "系统历史用户消息",
+                                            null),
+                                        new CodexThreadHistoryEntryPayload(
+                                            "item-history-agent",
+                                            "turn-history-system",
+                                            "assistant",
+                                            "系统历史助手回复",
+                                            "final_answer"),
+                                    ],
+                                    false),
+                                RelayJson.Options),
+                            cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
                 case RelayMessageTypes.ControlThreadStart:
                     await SendThreadActionAsync(
                         envelope,

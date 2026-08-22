@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 - 2026-08-23
+
+- Added permission-checked `thread/read` history loading so selecting a session renders its persisted user and assistant messages.
+- Grouped sessions by normalized project working directory with collapsible project sections on desktop and mobile.
+- Added stale-response protection, explicit loading/retry states and bounded history mapping below the Relay message limit.
+- Extended Agent, Relay, system-host and Chromium/WebKit coverage for real history reads and project folding.
+
 ## 0.2.1 - 2026-08-22
 
 - Reworked the PWA into a familiar chat workspace with a conversation sidebar, central message stream and bottom composer.

@@ -122,7 +122,7 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 .sidebar-backdrop { display: none; }
 
 .chat-main { min-width: 0; min-height: 0; height: 100%; overflow: hidden; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--main); }
-.chat-header { height: 58px; display: flex; align-items: center; gap: 12px; padding: 0 18px; border-bottom: 1px solid rgba(255, 255, 255, .06); }
+.chat-header { grid-row: 1; height: 58px; display: flex; align-items: center; gap: 12px; padding: 0 18px; border-bottom: 1px solid rgba(255, 255, 255, .06); }
 .menu-button { display: none; }
 .chat-title { min-width: 0; flex: 1; display: grid; gap: 2px; }
 .chat-title strong, .chat-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -130,11 +130,11 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 .chat-title span { color: var(--faint); font-size: 11px; }
 .stop-button { padding: 7px 10px; color: #ffb4ba; border-radius: 8px; background: rgba(239, 106, 117, .1); font-size: 12px; }
 .stop-button:hover:not(:disabled) { background: rgba(239, 106, 117, .18); }
-.runtime-strip { min-height: 36px; padding: 8px 18px; display: flex; align-items: center; justify-content: center; gap: 9px; color: var(--muted); background: rgba(255, 255, 255, .025); border-bottom: 1px solid rgba(255, 255, 255, .04); font-size: 11px; }
+.runtime-strip { grid-row: 2; min-height: 36px; padding: 8px 18px; display: flex; align-items: center; justify-content: center; gap: 9px; color: var(--muted); background: rgba(255, 255, 255, .025); border-bottom: 1px solid rgba(255, 255, 255, .04); font-size: 11px; }
 .runtime-strip code { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd; }
 .pulse-dot { width: 7px; height: 7px; border-radius: 50%; background: #6ee7b7; box-shadow: 0 0 10px rgba(110, 231, 183, .5); }
 
-.chat-feed { min-width: 0; min-height: 0; overflow: hidden auto; overscroll-behavior: contain; padding: 28px 24px 18px; scroll-behavior: smooth; }
+.chat-feed { grid-row: 3; min-width: 0; min-height: 0; overflow: hidden auto; overscroll-behavior: contain; padding: 28px 24px 18px; scroll-behavior: smooth; }
 .message-column, .approval-message, .chat-error { width: min(100%, 760px); min-width: 0; margin-left: auto; margin-right: auto; }
 .empty-chat { min-height: 100%; display: grid; place-content: center; justify-items: center; text-align: center; padding-bottom: 12vh; }
 .empty-chat.compact { min-height: 55%; }
@@ -171,7 +171,7 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 .approval-message pre { padding: 11px; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 8px; background: #151515; }
 .approval-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.composer-dock { position: relative; z-index: 5; width: min(100%, 820px); min-width: 0; margin: 0 auto; padding: 8px 24px max(12px, env(safe-area-inset-bottom)); background: linear-gradient(to bottom, rgba(33, 33, 33, 0), var(--main) 14px); }
+.composer-dock { grid-row: 4; position: relative; z-index: 5; width: min(100%, 820px); min-width: 0; margin: 0 auto; padding: 8px 24px max(12px, env(safe-area-inset-bottom)); background: linear-gradient(to bottom, rgba(33, 33, 33, 0), var(--main) 14px); }
 .project-picker { margin: 0 8px 8px; display: flex; align-items: center; gap: 8px; color: var(--faint); }
 .project-picker input { flex: 1; min-width: 0; padding: 8px 10px; border: 0; border-radius: 8px; outline: none; background: rgba(255, 255, 255, .04); font-size: 12px; }
 .composer { padding: 12px; border: 1px solid var(--border); border-radius: 24px; background: var(--surface); box-shadow: 0 8px 30px rgba(0, 0, 0, .22); }

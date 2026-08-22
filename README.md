@@ -85,7 +85,7 @@ npm run dev
   --pair
 ```
 
-默认会优先使用 PATH 中的独立 Codex CLI。若仅安装 Codex Desktop，Agent 会识别其 WindowsApps 包，把同版本的 `codex.exe`、Code Mode Host、Command Runner 和 Sandbox Setup 原子暂存到当前用户的 `%LOCALAPPDATA%\CodexControl\codex-runtimes\desktop` 后使用；不会附加 Desktop 已打开的会话。显式 `--codex-path` 仍可覆盖自动发现。
+默认会优先使用 PATH 中的独立 Codex CLI。若独立 PowerShell 的 PATH 不包含 Codex，Agent 会从当前用户的 AppX Package Repository 查找最高版本 `OpenAI.Codex`，严格校验 WindowsApps 包路径，再把同版本的 `codex.exe`、Code Mode Host、Command Runner 和 Sandbox Setup 原子暂存到 `%LOCALAPPDATA%\CodexControl\codex-runtimes\desktop` 后使用；不会附加 Desktop 已打开的会话。显式 `--codex-path` 仍可覆盖自动发现。
 
 Agent 输出：
 

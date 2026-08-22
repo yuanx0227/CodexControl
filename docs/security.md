@@ -11,7 +11,8 @@
 ### Codex Desktop 运行时
 
 - 不附加、读取或控制 Desktop 已打开的会话；
-- 只识别 `WindowsApps\OpenAI.Codex_*` 包中的固定四个运行时文件；
+- PATH 不可用时只从当前用户 AppX Package Repository 读取 `OpenAI.Codex_*` 的 `PackageRootFolder`；
+- 严格校验目标仍位于 `WindowsApps\OpenAI.Codex_*`，只接受固定四个运行时文件；
 - 运行时只复制到当前用户数据目录，不修改 WindowsApps；
 - 以 Desktop 包版本隔离目录，并通过 staging directory + atomic move 发布；
 - 每次启动仍执行 `--version`、`--remote` 与 app-server stdio 能力检查；

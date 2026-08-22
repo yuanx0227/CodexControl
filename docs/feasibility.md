@@ -75,6 +75,8 @@ first launch: STAGED
 second launch: REUSED
 four runtime executable SHA-256 comparisons: PASS
 capability probe: --remote=true, app-server stdio=true
+PATH without Codex: AppX registry fallback STAGED / PASS
+PATH with only WindowsApps alias: AppX registry fallback REUSED / PASS
 ```
 
 真实 Codex：

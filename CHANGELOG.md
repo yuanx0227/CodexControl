@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 - 2026-08-22
+
+- Added AppX package repository discovery when an independent PowerShell PATH cannot resolve Codex Desktop.
+- Ignored unresolved Windows App Execution Alias entries and selected the highest installed `OpenAI.Codex` package.
+- Verified first-stage and reuse behavior with Codex removed from PATH.
+
 ## 0.1.1 - 2026-08-22
 
 - Added automatic discovery of the Codex Desktop runtime on Windows.

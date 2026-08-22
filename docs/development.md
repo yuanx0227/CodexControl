@@ -54,7 +54,7 @@ Playwright 使用本机 Edge channel 做 Chromium/Android 路径，并使用 Pla
 
 ## Real Codex
 
-产品 Agent 会自动识别 Codex Desktop 的 WindowsApps 包，并把以下同版本文件原子暂存到 `%LOCALAPPDATA%\CodexControl\codex-runtimes\desktop\<包版本>`；第二次启动直接复用：
+产品 Agent 先检查 PATH；若独立 PowerShell 无法解析 Codex，则从当前用户 AppX Package Repository 选择最高版本 `OpenAI.Codex`。校验 WindowsApps 包路径后，把以下同版本文件原子暂存到 `%LOCALAPPDATA%\CodexControl\codex-runtimes\desktop\<包版本>`；第二次启动直接复用：
 
 ```text
 codex.exe

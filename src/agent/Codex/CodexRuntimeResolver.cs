@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Runtime.Versioning;
+using System.Security;
 using CodexControl.Agent.Diagnostics;
+using Microsoft.Win32;
 
 namespace CodexControl.Agent.Codex;
 
@@ -22,6 +25,9 @@ public sealed record CodexRuntimeResolution(
 /// </summary>
 public static class CodexRuntimeResolver
 {
+    private const string DesktopPackagePrefix = "OpenAI.Codex_";
+    private const string AppxRepositoryPath =
+        @"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
     private static readonly TimeSpan LocatorTimeout = TimeSpan.FromSeconds(5);
     private static readonly string[] DesktopRuntimeFiles =
     [
@@ -44,6 +50,7 @@ public static class CodexRuntimeResolver
         if (OperatingSystem.IsWindows() && IsCommandName(candidate))
         {
             var located = await LocateWindowsExecutableAsync(candidate, cancellationToken).ConfigureAwait(false);
+            located ??= LocateInstalledDesktopExecutable();
             if (located is not null)
             {
                 candidate = located;
@@ -235,8 +242,95 @@ public static class CodexRuntimeResolver
             .Select(Path.GetFullPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        return candidates.FirstOrDefault(static value => !IsWindowsAppsDesktopExecutable(value))
-            ?? candidates.FirstOrDefault();
+        return candidates.FirstOrDefault(static value =>
+                   !IsWindowsAppsDesktopExecutable(value) && !IsWindowsAppExecutionAlias(value))
+               ?? candidates.FirstOrDefault(IsWindowsAppsDesktopExecutable);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string? LocateInstalledDesktopExecutable()
+    {
+        try
+        {
+            using var repository = Registry.CurrentUser.OpenSubKey(AppxRepositoryPath, writable: false);
+            if (repository is null)
+            {
+                return null;
+            }
+
+            return repository.GetSubKeyNames()
+                .Where(static name => name.StartsWith(DesktopPackagePrefix, StringComparison.OrdinalIgnoreCase))
+                .Select(name => ReadDesktopPackage(repository, name))
+                .Where(static package => package is not null)
+                .Select(static package => package!)
+                .OrderByDescending(static package => package.Version)
+                .ThenByDescending(static package => package.PackageName, StringComparer.OrdinalIgnoreCase)
+                .Select(static package => package.ExecutablePath)
+                .FirstOrDefault(IsWindowsAppsDesktopExecutable);
+        }
+        catch (Exception exception) when (exception is SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return null;
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static DesktopPackageCandidate? ReadDesktopPackage(RegistryKey repository, string packageName)
+    {
+        try
+        {
+            using var package = repository.OpenSubKey(packageName, writable: false);
+            var root = package?.GetValue("PackageRootFolder") as string;
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return null;
+            }
+
+            var fullRoot = Path.GetFullPath(root);
+            if (!string.Equals(Path.GetFileName(fullRoot), packageName, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var executable = Path.Combine(fullRoot, "app", "resources", "codex.exe");
+            if (!File.Exists(executable) || !IsWindowsAppsDesktopExecutable(executable))
+            {
+                return null;
+            }
+
+            return new DesktopPackageCandidate(packageName, ParsePackageVersion(packageName), executable);
+        }
+        catch (Exception exception) when (exception is SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return null;
+        }
+    }
+
+    private static Version ParsePackageVersion(string packageName)
+    {
+        var remainder = packageName[DesktopPackagePrefix.Length..];
+        var separator = remainder.IndexOf('_', StringComparison.Ordinal);
+        return separator > 0 && Version.TryParse(remainder[..separator], out var version)
+            ? version
+            : new Version(0, 0);
+    }
+
+    private static bool IsWindowsAppExecutionAlias(string value)
+    {
+        if (!Path.IsPathRooted(value))
+        {
+            return false;
+        }
+
+        var aliasRoot = Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Microsoft",
+            "WindowsApps"));
+        var fullPath = Path.GetFullPath(value);
+        return string.Equals(Path.GetFileName(fullPath), "codex.exe", StringComparison.OrdinalIgnoreCase) &&
+               fullPath.StartsWith(
+                   aliasRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                   StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsWindowsAppsDesktopExecutable(string value)
@@ -256,7 +350,7 @@ public static class CodexRuntimeResolver
                    "WindowsApps",
                    StringComparison.OrdinalIgnoreCase)) &&
                segments.Any(static segment => segment.StartsWith(
-                   "OpenAI.Codex_",
+                   DesktopPackagePrefix,
                    StringComparison.OrdinalIgnoreCase));
     }
 
@@ -265,7 +359,7 @@ public static class CodexRuntimeResolver
         var current = new DirectoryInfo(sourceDirectory);
         while (current is not null)
         {
-            if (current.Name.StartsWith("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase))
+            if (current.Name.StartsWith(DesktopPackagePrefix, StringComparison.OrdinalIgnoreCase))
             {
                 return current.Name;
             }
@@ -351,6 +445,11 @@ public static class CodexRuntimeResolver
         }
     }
 }
+
+internal sealed record DesktopPackageCandidate(
+    string PackageName,
+    Version Version,
+    string ExecutablePath);
 
 public sealed record DesktopRuntimeStageResult(
     string ExecutablePath,

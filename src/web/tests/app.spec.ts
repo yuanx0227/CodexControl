@@ -30,8 +30,10 @@ async function installRelayMock(page: Page, options: {
     cwd: 'D:\\Projects\\MES',
     createdAt: 1_730_831_111,
     updatedAt: 1_730_832_222,
+    recencyAt: 1_730_832_500,
     status: 'notLoaded',
     sourceKind: 'appServer',
+    projectId: 'project-mes',
   }, {
     threadId: 'thr-history-2',
     name: 'MES 第二个会话',
@@ -39,28 +41,34 @@ async function installRelayMock(page: Page, options: {
     cwd: 'D:\\Projects\\MES',
     createdAt: 1_730_811_111,
     updatedAt: 1_730_812_222,
+    recencyAt: 1_730_833_000,
     status: 'notLoaded',
     sourceKind: 'appServer',
+    projectId: 'project-mes',
   }, {
     threadId: 'thr-vision-1',
     name: 'Vision 相机会话',
     preview: '检查相机连接',
-    cwd: 'D:\\Projects\\Vision',
+    cwd: 'C:\\Users\\Yx\\Documents\\Codex\\2026-08-19\\vision-session',
     createdAt: 1_730_711_111,
     updatedAt: 1_730_712_222,
+    recencyAt: 1_730_831_000,
     status: 'notLoaded',
     sourceKind: 'appServer',
+    projectId: undefined,
   }];
   for (let index = 0; index < (options.extraSingletonProjects ?? 0); index += 1) {
     threadSummaries.push({
       threadId: `thr-singleton-${index}`,
       name: `Singleton 会话 ${index}`,
       preview: `单会话项目 ${index}`,
-      cwd: `D:\\Projects\\Singleton-${index}`,
+      cwd: `C:\\Users\\Yx\\Documents\\Codex\\2026-08-${String(10 + (index % 10)).padStart(2, '0')}\\singleton-${index}`,
       createdAt: 1_730_600_000 - index,
       updatedAt: 1_730_700_000 - index,
+      recencyAt: 1_730_800_000 - index,
       status: 'notLoaded',
       sourceKind: 'appServer',
+      projectId: undefined,
     });
   }
   const historyEntries = Array.from({ length: options.historyEntryCount ?? 2 }, (_, index) => ({
@@ -145,6 +153,17 @@ async function installRelayMock(page: Page, options: {
             status: 'succeeded',
             result: {
               threads: threadSummaries,
+              projects: [{
+                projectId: 'project-vision-workspace',
+                name: 'Vision Workspace',
+                position: 0,
+                roots: ['D:\\Projects\\VisionWorkspace'],
+              }, {
+                projectId: 'project-mes',
+                name: 'MES',
+                position: 1,
+                roots: ['D:\\Projects\\MES'],
+              }],
             },
           }, envelope.deviceId, envelope.controllerId)));
           break;
@@ -211,6 +230,44 @@ async function installRelayMock(page: Page, options: {
           availableDecisions: ['accept', 'decline'],
           requestedAt: Date.now(),
         },
+      }, deviceId)));
+    },
+    sendAgentDelta(delta: string, itemId = 'item-live') {
+      if (!route) throw new Error('WebSocket mock is not connected');
+      route.send(JSON.stringify(reply('codex.event', undefined, {
+        eventId: `evt-delta-${crypto.randomUUID()}`,
+        revision: 9,
+        kind: 'AgentMessageDelta',
+        threadId: 'thr-1',
+        turnId: 'turn-1',
+        itemId,
+        occurredAt: Date.now(),
+        data: { delta },
+      }, deviceId)));
+    },
+    sendAgentCompleted(text: string, itemId = 'item-live') {
+      if (!route) throw new Error('WebSocket mock is not connected');
+      route.send(JSON.stringify(reply('codex.event', undefined, {
+        eventId: `evt-completed-${crypto.randomUUID()}`,
+        revision: 10,
+        kind: 'AgentMessageCompleted',
+        threadId: 'thr-1',
+        turnId: 'turn-1',
+        itemId,
+        occurredAt: Date.now(),
+        data: { text },
+      }, deviceId)));
+    },
+    sendTurnCompleted() {
+      if (!route) throw new Error('WebSocket mock is not connected');
+      route.send(JSON.stringify(reply('codex.event', undefined, {
+        eventId: `evt-turn-completed-${crypto.randomUUID()}`,
+        revision: 11,
+        kind: 'TurnCompleted',
+        threadId: 'thr-1',
+        turnId: 'turn-1',
+        occurredAt: Date.now(),
+        data: { status: 'completed' },
       }, deviceId)));
     },
   };
@@ -286,16 +343,45 @@ test('sends steer, interrupt and the exact available approval decision', async (
   )).toBe(true);
 });
 
+test('streams the active Codex reply with a typewriter and finalizes it', async ({ page }) => {
+  const relay = await installRelayMock(page);
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+
+  const initialReadCount = relay.captured.filter((message) => message.type === 'control.thread.read').length;
+  const initialListCount = relay.captured.filter((message) => message.type === 'control.thread.list').length;
+  relay.sendAgentDelta('第一段');
+  relay.sendAgentDelta('第二段');
+
+  await expect(page.locator('.typing-caret')).toBeVisible();
+  await expect(page.getByText('第一段第二段', { exact: true })).toBeVisible({ timeout: 5_000 });
+  relay.sendAgentCompleted('第一段第二段，回复完成');
+  await expect(page.getByText('第一段第二段，回复完成', { exact: true })).toBeVisible();
+  await expect(page.locator('.typing-caret')).toHaveCount(0);
+
+  relay.sendTurnCompleted();
+  await expect.poll(() => relay.captured.filter((message) => message.type === 'control.thread.read').length)
+    .toBeGreaterThan(initialReadCount);
+  await expect.poll(() => relay.captured.filter((message) => message.type === 'control.thread.list').length)
+    .toBeGreaterThan(initialListCount);
+});
+
 test('lists real history and starts or resumes Codex sessions', async ({ page }) => {
   const relay = await installRelayMock(page, { activeTurn: false });
   await pair(page);
   await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
 
   await page.getByRole('button', { name: '打开会话栏' }).click();
-  const mesProject = page.getByRole('button', { name: 'MES，2 个会话' });
+  const projectNames = await page.locator('.project-copy strong').allTextContents();
+  expect(projectNames.slice(0, 2)).toEqual(['Vision Workspace', 'MES']);
+  const mesProject = page.getByRole('button', { name: '项目 MES' });
   await expect(mesProject).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.getByRole('button', { name: 'Vision，1 个会话' })).toHaveCount(0);
+  const mesRegionId = await mesProject.getAttribute('aria-controls');
+  const mesThreadNames = await page.locator(`#${mesRegionId} .conversation-link span`).allTextContents();
+  expect(mesThreadNames).toEqual(['MES 第二个会话', '历史测试会话']);
   await expect(page.getByRole('button', { name: /^Vision 相机会话/u })).toBeVisible();
+  await expect(page.getByText('最近', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '在 Vision 中新建会话' })).toHaveCount(0);
   await page.getByRole('button', { name: '在 MES 中新建会话' }).click();
   await expect(page.getByLabel('电脑上的项目目录')).toHaveValue('D:\\Projects\\MES');
   await page.getByLabel('第一条任务').fill('在 MES 项目中新建任务');
@@ -400,7 +486,9 @@ test('keeps sidebar scroll and composer visible with long history', async ({ pag
 test('pairing success toast clears automatically', async ({ page }) => {
   await page.clock.install();
   await installRelayMock(page, { activeTurn: false });
-  await pair(page);
+  await page.goto('/');
+  await page.getByLabel('六位配对码').fill('123456');
+  await page.getByRole('button', { name: '配对', exact: true }).click();
   const toast = page.getByText('配对成功', { exact: true });
   await expect(toast).toBeVisible();
   await page.clock.fastForward(3_000);

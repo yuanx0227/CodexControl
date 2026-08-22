@@ -71,12 +71,22 @@ export interface CodexThreadSummary {
   cwd?: string;
   createdAt?: number;
   updatedAt?: number;
+  recencyAt?: number;
   status: string;
   sourceKind?: string;
+  projectId?: string;
+}
+
+export interface CodexProjectSummary {
+  projectId: string;
+  name: string;
+  position: number;
+  roots: string[];
 }
 
 export interface CodexThreadListResult {
   threads: CodexThreadSummary[];
+  projects: CodexProjectSummary[];
   nextCursor?: string;
 }
 

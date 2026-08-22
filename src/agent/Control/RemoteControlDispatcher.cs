@@ -16,6 +16,8 @@ public sealed class RemoteControlDispatcher
 {
     private const int ThreadItemsPageSize = 100;
     private const int MaxThreadItemPages = 20;
+    private const int ProjectPageSize = 100;
+    private const int MaxProjectPages = 5;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan HistoryTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ThreadMutationTimeout = TimeSpan.FromSeconds(30);
@@ -108,7 +110,12 @@ public sealed class RemoteControlDispatcher
                 },
                 HistoryTimeout,
                 cancellationToken).ConfigureAwait(false);
-            return Success(JsonSerializer.SerializeToElement(MapThreadList(result), RelayJson.Options));
+            var projects = cursor is null
+                ? await ListProjectsAsync(cancellationToken).ConfigureAwait(false)
+                : [];
+            return Success(JsonSerializer.SerializeToElement(
+                MapThreadList(result, projects),
+                RelayJson.Options));
         }
         catch (JsonException exception)
         {
@@ -421,7 +428,47 @@ public sealed class RemoteControlDispatcher
             RelayJson.Options));
     }
 
-    private static CodexThreadListResultPayload MapThreadList(JsonElement result)
+    private async Task<IReadOnlyList<CodexProjectSummaryPayload>> ListProjectsAsync(
+        CancellationToken cancellationToken)
+    {
+        var projects = new List<CodexProjectSummaryPayload>();
+        string? cursor = null;
+        for (var page = 0; page < MaxProjectPages; page++)
+        {
+            JsonElement result;
+            try
+            {
+                result = await _bridge.SendRequestAsync(
+                    "project/list",
+                    new { cursor, limit = ProjectPageSize },
+                    HistoryTimeout,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (AppServerRpcException exception) when (IsMethodUnavailable(exception, "project/list"))
+            {
+                return [];
+            }
+
+            var mapped = MapProjectPage(result);
+            projects.AddRange(mapped.Projects);
+            cursor = mapped.NextCursor;
+            if (cursor is null)
+            {
+                break;
+            }
+        }
+
+        return projects
+            .GroupBy(project => project.ProjectId, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .OrderBy(project => project.Position)
+            .ThenBy(project => project.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static CodexThreadListResultPayload MapThreadList(
+        JsonElement result,
+        IReadOnlyList<CodexProjectSummaryPayload> projects)
     {
         if (!result.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
         {
@@ -444,13 +491,56 @@ public sealed class RemoteControlDispatcher
                 GetString(thread, "cwd", MaxCwdLength),
                 GetInt64(thread, "createdAt"),
                 GetInt64(thread, "updatedAt"),
+                GetInt64(thread, "recencyAt"),
                 GetStatus(thread),
-                GetSourceKind(thread)));
+                GetSourceKind(thread),
+                GetString(thread, "projectId", 256)));
         }
 
         return new CodexThreadListResultPayload(
             threads,
+            projects,
             GetString(result, "nextCursor", 2_048));
+    }
+
+    private static ProjectPage MapProjectPage(JsonElement result)
+    {
+        if (!result.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+        {
+            throw new JsonException("project/list 未返回 data 数组。");
+        }
+
+        var projects = new List<CodexProjectSummaryPayload>();
+        foreach (var project in data.EnumerateArray())
+        {
+            var projectId = GetString(project, "id", 256);
+            var name = GetString(project, "name", 256);
+            if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            var roots = new List<string>();
+            if (project.TryGetProperty("roots", out var rootValues) && rootValues.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var root in rootValues.EnumerateArray())
+                {
+                    var path = GetString(root, "path", MaxCwdLength);
+                    if (!string.IsNullOrWhiteSpace(path))
+                    {
+                        roots.Add(path);
+                    }
+                }
+            }
+
+            projects.Add(new CodexProjectSummaryPayload(
+                projectId,
+                name,
+                GetInt64(project, "position") ?? long.MaxValue,
+                roots));
+        }
+
+        return new ProjectPage(projects, GetString(result, "nextCursor", 2_048));
     }
 
     private static string ReadRequiredId(JsonElement result, string objectProperty, string method)
@@ -471,9 +561,16 @@ public sealed class RemoteControlDispatcher
         !string.IsNullOrWhiteSpace(value) && value.Length <= 256;
 
     private static bool IsThreadItemsListUnavailable(AppServerRpcException exception) =>
-        exception.Method == "thread/items/list" &&
+        IsMethodUnavailable(exception, "thread/items/list");
+
+    private static bool IsMethodUnavailable(AppServerRpcException exception, string method) =>
+        exception.Method == method &&
         (exception.Code == -32601 ||
          exception.Message.Contains("not supported", StringComparison.OrdinalIgnoreCase));
+
+    private sealed record ProjectPage(
+        IReadOnlyList<CodexProjectSummaryPayload> Projects,
+        string? NextCursor);
 
     private static string? GetString(JsonElement value, string propertyName, int maximumLength)
     {

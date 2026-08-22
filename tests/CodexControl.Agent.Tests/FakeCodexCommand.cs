@@ -119,14 +119,48 @@ internal static class FakeCodexCommand
                             "cwd":"D:\\Projects\\MES",
                             "createdAt":1730831111,
                             "updatedAt":1730832222,
+                            "recencyAt":1730833333,
                             "status":{"type":"notLoaded"},
-                            "source":{"kind":"appServer"}
+                            "source":{"kind":"appServer"},
+                            "projectId":"project-mes"
                           }
                         ],
                         "nextCursor":null
                       }
                       """
                     : """{"data":[],"nextCursor":null}""");
+                await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (method == "project/list")
+            {
+                using var resultDocument = JsonDocument.Parse("""
+                    {
+                      "data":[
+                        {
+                          "id":"project-vision",
+                          "name":"Vision Workspace",
+                          "position":0,
+                          "roots":[{"path":"D:\\Projects\\Vision"}],
+                          "metadata":{},
+                          "createdAt":1730000000,
+                          "updatedAt":1730000001
+                        },
+                        {
+                          "id":"project-mes",
+                          "name":"MES",
+                          "position":1,
+                          "roots":[{"path":"D:\\Projects\\MES"}],
+                          "metadata":{},
+                          "createdAt":1730000002,
+                          "updatedAt":1730000003
+                        }
+                      ],
+                      "nextCursor":null
+                    }
+                    """);
                 await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
                     .ConfigureAwait(false);
                 continue;

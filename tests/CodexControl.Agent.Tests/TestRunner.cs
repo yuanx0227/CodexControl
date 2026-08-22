@@ -655,6 +655,13 @@ internal static class TestRunner
             Assert(
                 updatedPayload.Threads.Any(thread => thread.ThreadId == createdThreadId),
                 "new appServer thread should appear in real history list");
+            Assert(
+                updatedPayload.Projects.Select(project => project.Position)
+                    .SequenceEqual(updatedPayload.Projects.Select(project => project.Position).Order()),
+                "project/list results should preserve Codex position order when available");
+            Assert(
+                updatedPayload.Threads.Any(thread => thread.RecencyAt is not null),
+                "real thread/list should preserve recencyAt for Desktop-compatible task ordering");
 
             var resumed = await dispatcher.ResumeThreadAsync(
                 createdThreadId,
@@ -775,8 +782,15 @@ internal static class TestRunner
             Assert(historyPayload.Threads.Count == 1, "history list should normalize stored threads");
             Assert(
                 historyPayload.Threads[0].ThreadId == "thr-history-1" &&
-                historyPayload.Threads[0].SourceKind == "appServer",
-                "history metadata should be preserved");
+                historyPayload.Threads[0].SourceKind == "appServer" &&
+                historyPayload.Threads[0].ProjectId == "project-mes",
+                "history metadata and project assignment should be preserved");
+            Assert(
+                historyPayload.Projects.Count == 2 &&
+                historyPayload.Projects[0].ProjectId == "project-vision" &&
+                historyPayload.Projects[1].ProjectId == "project-mes" &&
+                historyPayload.Projects[1].Roots.Single() == "D:\\Projects\\MES",
+                "project/list position and roots should be preserved");
 
             var threadRead = await dispatcher.ReadThreadAsync(
                 "thr-history-1",

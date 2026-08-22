@@ -456,7 +456,9 @@ Relay 默认不持久化完整 `data`；审计只保留 event kind、标识符�
 }
 ```
 
-Device 调用 `thread/list`，按 `recency_at desc` 查询 `cli`、`vscode`、`appServer`、`exec` 和 `unknown` 来源。返回值只规范化 `threadId/name/preview/cwd/createdAt/updatedAt/status/sourceKind`，Relay 不持久化正文。该请求要求 `view` 权限。
+Device 调用 `thread/list`，按 `recency_at desc` 查询 `cli`、`vscode`、`appServer`、`exec` 和 `unknown` 来源，同时调用 `project/list`。返回值规范化 `threadId/name/preview/cwd/createdAt/updatedAt/recencyAt/status/sourceKind/projectId` 与 `projectId/name/position/roots`。当前 Desktop 若返回空项目目录，PWA 只对真实工作 cwd 做兼容项目分组；自动日期会话进入“最近”。Relay 不持久化这些正文或导航字段。该请求要求 `view` 权限。
+
+`AgentMessageDelta` 的 `data.delta` 按 `itemId` 有序合并。PWA 必须立即更新当前助手消息并显示流式光标；`AgentMessageCompleted` 到达后删除对应 Delta 聚合项并采用最终 `data.text`，不得重复显示。
 
 读取指定历史会话：
 

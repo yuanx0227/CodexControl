@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 - 2026-08-23
+
+- Added Desktop-compatible task ordering through `recencyAt` instead of stale `updatedAt` timestamps.
+- Added `project/list` and `thread.projectId` support, with a safe cwd fallback while current Desktop returns no persisted projects.
+- Split the sidebar into real project folders and a direct “Recent” task list; Recent items never render project-new actions.
+- Restyled project rows with folder icons, quieter hover-only desktop actions and compact child tasks.
+- Coalesced `item/agentMessage/delta` events into the active assistant message for immediate live updates.
+- Added a streaming typewriter caret, automatic near-bottom follow and final background history refresh.
+
 ## 0.3.2 - 2026-08-23
 
 - Preferred metadata plus paged `thread/items/list` reads, with a bounded high-capacity `thread/read` fallback for current Desktop builds that report the paged method as unsupported.

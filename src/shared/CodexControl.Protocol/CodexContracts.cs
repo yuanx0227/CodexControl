@@ -19,11 +19,20 @@ public sealed record CodexThreadSummaryPayload(
     string? Cwd,
     long? CreatedAt,
     long? UpdatedAt,
+    long? RecencyAt,
     string Status,
-    string? SourceKind);
+    string? SourceKind,
+    string? ProjectId);
+
+public sealed record CodexProjectSummaryPayload(
+    string ProjectId,
+    string Name,
+    long Position,
+    IReadOnlyList<string> Roots);
 
 public sealed record CodexThreadListResultPayload(
     IReadOnlyList<CodexThreadSummaryPayload> Threads,
+    IReadOnlyList<CodexProjectSummaryPayload> Projects,
     string? NextCursor);
 
 public sealed record CodexThreadHistoryEntryPayload(

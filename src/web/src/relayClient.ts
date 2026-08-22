@@ -150,7 +150,9 @@ export class RelayClient {
 
   async listThreads(deviceId: string): Promise<CodexThreadListResult> {
     const threads: CodexThreadListResult['threads'] = [];
+    const projects: CodexThreadListResult['projects'] = [];
     const seenThreadIds = new Set<string>();
+    const seenProjectIds = new Set<string>();
     let cursor: string | undefined;
     for (let page = 0; page < 5; page += 1) {
       const result = await this.readControl<CodexThreadListResult>(
@@ -166,12 +168,18 @@ export class RelayClient {
           threads.push(thread);
         }
       }
+      for (const project of result.result.projects ?? []) {
+        if (!seenProjectIds.has(project.projectId)) {
+          seenProjectIds.add(project.projectId);
+          projects.push(project);
+        }
+      }
 
       cursor = result.result.nextCursor;
-      if (!cursor) return { threads };
+      if (!cursor) return { threads, projects };
     }
 
-    return { threads, nextCursor: cursor };
+    return { threads, projects, nextCursor: cursor };
   }
 
   async readThread(deviceId: string, threadId: string): Promise<CodexThreadReadResult> {
@@ -262,7 +270,7 @@ export class RelayClient {
     this.send(
       createEnvelope(
         MessageType.authHello,
-        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.3.2' },
+        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.4.0' },
         { requestId: this.authRequestId, controllerId: identity.controllerId },
       ),
     );
@@ -486,7 +494,34 @@ export class RelayClient {
 
   private applyEvent(deviceId: string | undefined, event: CodexEvent): void {
     if (!deviceId) return;
-    const events = [event, ...(this.state.events[deviceId] ?? [])].slice(0, 100);
+    const currentEvents = this.state.events[deviceId] ?? [];
+    let events: CodexEvent[];
+    if (event.kind === 'AgentMessageDelta' && event.itemId) {
+      const delta = typeof event.data.delta === 'string' ? event.data.delta : '';
+      const existing = currentEvents.find((candidate) =>
+        candidate.kind === 'AgentMessageDelta' && candidate.itemId === event.itemId,
+      );
+      const previousText = existing && typeof existing.data.text === 'string' ? existing.data.text : '';
+      const streamingEvent: CodexEvent = {
+        ...(existing ?? event),
+        revision: event.revision,
+        occurredAt: event.occurredAt,
+        data: { text: `${previousText}${delta}` },
+      };
+      events = [
+        streamingEvent,
+        ...currentEvents.filter((candidate) => candidate !== existing),
+      ].slice(0, 100);
+    } else if (event.kind === 'AgentMessageCompleted' && event.itemId) {
+      events = [
+        event,
+        ...currentEvents.filter((candidate) =>
+          !(candidate.kind === 'AgentMessageDelta' && candidate.itemId === event.itemId),
+        ),
+      ].slice(0, 100);
+    } else {
+      events = [event, ...currentEvents].slice(0, 100);
+    }
     const approvals = { ...this.state.approvals };
     if (event.kind === 'ApprovalRequested') {
       const approval = event.data as unknown as ApprovalRequested;

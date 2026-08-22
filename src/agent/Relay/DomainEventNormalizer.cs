@@ -46,7 +46,7 @@ internal static class DomainEventNormalizer
             }, RelayJson.Options),
             "AgentMessageCompleted" => JsonSerializer.SerializeToElement(new
             {
-                text = Truncate(FindString(message, "params", "item", "text"), 4000),
+                text = Truncate(FindString(message, "params", "item", "text"), 20_000),
             }, RelayJson.Options),
             "TurnCompleted" => JsonSerializer.SerializeToElement(new
             {

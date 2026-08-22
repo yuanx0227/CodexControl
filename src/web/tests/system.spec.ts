@@ -18,8 +18,9 @@ test('real Relay validates browser crypto pairing and routes all controls', asyn
   await page.goto('/');
   await page.getByLabel('六位配对码').fill(pairingCode);
   await page.getByRole('button', { name: '配对', exact: true }).click();
-  await expect(page.getByText('SYSTEM-DEV-PC')).toBeVisible();
-  await page.getByRole('button', { name: '打开 SYSTEM-DEV-PC' }).click();
+  const systemDevice = page.getByRole('button', { name: '打开 SYSTEM-DEV-PC' });
+  await expect(systemDevice).toBeVisible({ timeout: 20_000 });
+  await systemDevice.click();
 
   await expect(page.getByRole('main').getByText('D:\\Projects\\SystemTest', { exact: true })).toBeVisible();
   await expect(page.getByRole('main').getByText('等待远程控制', { exact: true }))

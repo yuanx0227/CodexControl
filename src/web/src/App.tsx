@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import type {
   ApprovalRequested,
   CodexEvent,
+  CodexProjectSummary,
   CodexSnapshot,
   CodexThreadReadResult,
   CodexThreadSummary,
@@ -238,13 +239,20 @@ interface ChatEntry {
   role: 'user' | 'assistant' | 'tool' | 'system';
   text: string;
   meta?: string;
+  streaming?: boolean;
 }
 
-interface ThreadProjectGroup {
+interface ProjectNavigationGroup {
   key: string;
   name: string;
   cwd?: string;
+  position: number;
   threads: CodexThreadSummary[];
+}
+
+interface ThreadNavigation {
+  projects: ProjectNavigationGroup[];
+  recent: CodexThreadSummary[];
 }
 
 function DeviceWorkspace({
@@ -275,6 +283,7 @@ function DeviceWorkspace({
   toast?: string;
 }) {
   const [threads, setThreads] = useState<CodexThreadSummary[]>([]);
+  const [projects, setProjects] = useState<CodexProjectSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [threadHistory, setThreadHistory] = useState<CodexThreadReadResult>();
   const [threadHistoryLoading, setThreadHistoryLoading] = useState(false);
@@ -291,6 +300,8 @@ function DeviceWorkspace({
   const [localEntries, setLocalEntries] = useState<ChatEntry[]>([]);
   const threadHistoryRequest = useRef(0);
   const chatFeed = useRef<HTMLElement>(null);
+  const stickChatToBottom = useRef(true);
+  const lastRefreshedCompletion = useRef<string | undefined>(undefined);
   const snapshot = device.snapshot;
   const workspaceConnection = authenticated
     ? connection
@@ -304,6 +315,7 @@ function DeviceWorkspace({
     try {
       const history = await client.listThreads(device.deviceId);
       setThreads(history.threads);
+      setProjects(history.projects);
       setError(undefined);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -312,20 +324,23 @@ function DeviceWorkspace({
     }
   }, [client, device.deviceId]);
 
-  const loadThread = useCallback(async (threadId: string) => {
+  const loadThread = useCallback(async (threadId: string, background = false) => {
     const request = ++threadHistoryRequest.current;
-    setThreadHistoryLoading(true);
-    setThreadHistoryError(undefined);
+    if (!background) {
+      setThreadHistoryLoading(true);
+      setThreadHistoryError(undefined);
+    }
     try {
       const history = await client.readThread(device.deviceId, threadId);
       if (request !== threadHistoryRequest.current) return;
       setThreadHistory(history);
     } catch (reason) {
       if (request !== threadHistoryRequest.current) return;
+      if (background) return;
       setThreadHistory(undefined);
       setThreadHistoryError(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      if (request === threadHistoryRequest.current) setThreadHistoryLoading(false);
+      if (!background && request === threadHistoryRequest.current) setThreadHistoryLoading(false);
     }
   }, [client, device.deviceId]);
 
@@ -371,32 +386,31 @@ function DeviceWorkspace({
     if (snapshot?.status === 'Interrupted') setInterrupting(false);
   }, [snapshot?.status]);
 
-  const threadGroups = useMemo(() => groupThreadsByProject(threads), [threads]);
+  const navigation = useMemo(() => buildThreadNavigation(threads, projects), [projects, threads]);
   const selectedThread = threads.find((thread) => thread.threadId === selectedThreadId);
 
   useEffect(() => {
-    if (threadGroups.length === 0) return;
+    if (navigation.projects.length === 0) return;
     setExpandedProjects((current) => {
-      const collapsible = threadGroups.filter((group) => group.threads.length > 1);
-      const available = new Set(collapsible.map((group) => group.key));
+      const available = new Set(navigation.projects.map((group) => group.key));
       const next = new Set([...current].filter((key) => available.has(key)));
-      if (next.size === 0 && collapsible.length > 0) next.add(collapsible[0].key);
+      if (next.size === 0) next.add(navigation.projects[0].key);
       return setsEqual(current, next) ? current : next;
     });
-  }, [threadGroups]);
+  }, [navigation.projects]);
 
   useEffect(() => {
     if (!selectedThread) return;
-    const group = threadGroups.find((candidate) => candidate.threads.includes(selectedThread));
-    if (!group || group.threads.length < 2) return;
-    const key = projectKey(selectedThread.cwd);
+    const group = navigation.projects.find((candidate) =>
+      candidate.key === selectedThread.projectId || candidate.threads.includes(selectedThread),
+    );
+    if (!group) return;
+    const key = group.key;
     setExpandedProjects((current) => {
       if (current.has(key)) return current;
-      const next = new Set(current);
-      next.add(key);
-      return next;
+      return new Set([key]);
     });
-  }, [selectedThread, threadGroups]);
+  }, [navigation.projects, selectedThread]);
 
   const hasActiveTurn = Boolean(snapshot?.activeThreadId && snapshot.activeTurnId);
   const conversationId = snapshot?.activeThreadId ?? selectedThreadId;
@@ -418,14 +432,41 @@ function DeviceWorkspace({
     () => mergeChatEntries(historicalEntries, localEntries, eventEntries),
     [eventEntries, historicalEntries, localEntries],
   );
+  const tailEntry = chatEntries.at(-1);
+  const completedEvent = events.find((event) =>
+    event.kind === 'TurnCompleted' &&
+    selectedThreadId &&
+    event.threadId === selectedThreadId,
+  );
 
   useEffect(() => {
     if (!threadHistory || threadHistory.threadId !== selectedThreadId) return;
     const frame = window.requestAnimationFrame(() => {
-      if (chatFeed.current) chatFeed.current.scrollTop = chatFeed.current.scrollHeight;
+      if (chatFeed.current) {
+        chatFeed.current.scrollTop = chatFeed.current.scrollHeight;
+        stickChatToBottom.current = true;
+      }
     });
     return () => window.cancelAnimationFrame(frame);
   }, [selectedThreadId, threadHistory]);
+
+  useEffect(() => {
+    if (!tailEntry || !stickChatToBottom.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (chatFeed.current) chatFeed.current.scrollTop = chatFeed.current.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [tailEntry?.id, tailEntry?.text]);
+
+  useEffect(() => {
+    if (!completedEvent || !selectedThreadId || lastRefreshedCompletion.current === completedEvent.eventId) return;
+    lastRefreshedCompletion.current = completedEvent.eventId;
+    const timer = window.setTimeout(() => {
+      void loadThread(selectedThreadId, true);
+      void refreshThreads();
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [completedEvent, loadThread, refreshThreads, selectedThreadId]);
 
   function selectThread(threadId: string) {
     if (threadId === selectedThreadId && !newSession) {
@@ -437,6 +478,7 @@ function DeviceWorkspace({
       setThreadHistoryError(undefined);
     }
     setSelectedThreadId(threadId);
+    stickChatToBottom.current = true;
     setNewSession(false);
     setSidebarOpen(false);
     setLocalEntries([]);
@@ -447,6 +489,7 @@ function DeviceWorkspace({
   function beginNewSession(cwd?: string) {
     threadHistoryRequest.current += 1;
     setSelectedThreadId(undefined);
+    stickChatToBottom.current = true;
     setNewSession(true);
     setSidebarOpen(false);
     setLocalEntries([]);
@@ -460,10 +503,7 @@ function DeviceWorkspace({
 
   function toggleProject(key: string) {
     setExpandedProjects((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
+      return current.has(key) ? new Set() : new Set([key]);
     });
   }
 
@@ -546,79 +586,69 @@ function DeviceWorkspace({
         <nav className="conversation-nav" aria-label="历史会话">
           {historyLoading ? <p className="sidebar-empty">正在读取历史…</p> : !device.online ? (
             <p className="sidebar-empty">电脑 Agent 离线，恢复后自动加载</p>
-          ) : threads.length === 0 ? (
+          ) : threads.length === 0 && projects.length === 0 ? (
             <p className="sidebar-empty">暂无历史会话</p>
-          ) : threadGroups.map((group, index) => {
-            if (group.threads.length === 1) {
-              const thread = group.threads[0];
-              return (
-                <div className="singleton-thread-row" key={group.key}>
-                  <button
-                    className={`conversation-link ${selectedThreadId === thread.threadId && !newSession ? 'active' : ''}`}
-                    onClick={() => selectThread(thread.threadId)}
-                  >
-                    <span>{thread.name ?? thread.preview ?? '未命名会话'}</span>
-                    <small>{group.name} · {formatThreadTime(thread.updatedAt ?? thread.createdAt)}</small>
-                  </button>
-                  {group.cwd && (
-                    <button
-                      className="project-new-button"
-                      aria-label={`在 ${group.name} 中新建会话`}
-                      title={`在 ${group.name} 中新建会话`}
-                      disabled={hasActiveTurn}
-                      onClick={() => beginNewSession(group.cwd)}
-                    >＋</button>
-                  )}
-                </div>
-              );
-            }
-
-            const expanded = expandedProjects.has(group.key);
-            const regionId = `project-threads-${index}`;
-            return (
-              <section className="project-group" key={group.key}>
-                <div className="project-heading">
-                  <button
-                    className="project-toggle"
-                    aria-expanded={expanded}
-                    aria-controls={regionId}
-                    aria-label={`${group.name}，${group.threads.length} 个会话`}
-                    onClick={() => toggleProject(group.key)}
-                  >
-                    <span className={`project-chevron ${expanded ? 'expanded' : ''}`}>›</span>
-                    <span className="project-copy">
-                      <strong>{group.name}</strong>
-                      <small>{group.cwd ?? '未识别工作目录'}</small>
-                    </span>
-                    <span className="project-count">{group.threads.length}</span>
-                  </button>
-                  {group.cwd && (
-                    <button
-                      className="project-new-button"
-                      aria-label={`在 ${group.name} 中新建会话`}
-                      title={`在 ${group.name} 中新建会话`}
-                      disabled={hasActiveTurn}
-                      onClick={() => beginNewSession(group.cwd)}
-                    >＋</button>
-                  )}
-                </div>
-                {expanded && (
-                  <div className="project-thread-list" id={regionId}>
-                    {group.threads.map((thread) => (
+          ) : (
+            <>
+              {navigation.projects.map((group, index) => {
+                const expanded = expandedProjects.has(group.key);
+                const regionId = `project-threads-${index}`;
+                return (
+                  <section className="project-group" key={group.key}>
+                    <div className="project-heading">
                       <button
-                        key={thread.threadId}
-                        className={`conversation-link ${selectedThreadId === thread.threadId && !newSession ? 'active' : ''}`}
-                        onClick={() => selectThread(thread.threadId)}
+                        className="project-toggle"
+                        aria-expanded={expanded}
+                        aria-controls={regionId}
+                        aria-label={`项目 ${group.name}`}
+                        onClick={() => toggleProject(group.key)}
                       >
-                        <span>{thread.name ?? thread.preview ?? '未命名会话'}</span>
-                        <small>{formatThreadTime(thread.updatedAt ?? thread.createdAt)}</small>
+                        <span className={`project-chevron ${expanded ? 'expanded' : ''}`}>›</span>
+                        <span className="project-folder" aria-hidden="true" />
+                        <span className="project-copy"><strong>{group.name}</strong></span>
                       </button>
-                    ))}
-                  </div>
-                )}
-              </section>
-            );
-          })}
+                      {group.cwd && (
+                        <button
+                          className="project-new-button"
+                          aria-label={`在 ${group.name} 中新建会话`}
+                          title={`在 ${group.name} 中新建会话`}
+                          disabled={hasActiveTurn}
+                          onClick={() => beginNewSession(group.cwd)}
+                        >＋</button>
+                      )}
+                    </div>
+                    {expanded && group.threads.length > 0 && (
+                      <div className="project-thread-list" id={regionId}>
+                        {group.threads.map((thread) => (
+                          <button
+                            key={thread.threadId}
+                            className={`conversation-link project-thread-link ${selectedThreadId === thread.threadId && !newSession ? 'active' : ''}`}
+                            title={formatThreadTime(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt)}
+                            onClick={() => selectThread(thread.threadId)}
+                          >
+                            <span>{thread.name ?? thread.preview ?? '未命名会话'}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
+              {navigation.recent.length > 0 && (
+                <div className="sidebar-label recent-label"><span>最近</span></div>
+              )}
+              {navigation.recent.map((thread) => (
+                <button
+                  key={thread.threadId}
+                  className={`conversation-link recent-thread-link ${selectedThreadId === thread.threadId && !newSession ? 'active' : ''}`}
+                  title={`${thread.cwd ?? '无项目'} · ${formatThreadTime(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt)}`}
+                  onClick={() => selectThread(thread.threadId)}
+                >
+                  <span>{thread.name ?? thread.preview ?? '未命名会话'}</span>
+                </button>
+              ))}
+            </>
+          )}
         </nav>
         <div className="sidebar-footer">
           <div className="sidebar-device">
@@ -665,7 +695,15 @@ function DeviceWorkspace({
           </div>
         )}
 
-        <section className="chat-feed" aria-label="会话内容" ref={chatFeed}>
+        <section
+          className="chat-feed"
+          aria-label="会话内容"
+          ref={chatFeed}
+          onScroll={(event) => {
+            const target = event.currentTarget;
+            stickChatToBottom.current = target.scrollHeight - target.scrollTop - target.clientHeight < 96;
+          }}
+        >
           {!device.online && selectedThreadId && !newSession ? (
             <div className="history-loading" role="status">
               <span className="history-spinner" />
@@ -779,13 +817,22 @@ function ChatMessage({ entry }: { entry: ChatEntry }) {
     return <div className="tool-message"><span>›_</span><div><strong>{entry.meta ?? '电脑操作'}</strong><p>{entry.text}</p></div></div>;
   }
   return (
-    <article className={`chat-message ${entry.role}`}>
+    <article className={`chat-message ${entry.role} ${entry.streaming ? 'streaming' : ''}`}>
       {entry.role === 'assistant' && <span className="assistant-avatar">C</span>}
       <div>
         {entry.meta && <small>{entry.meta}</small>}
-        <p>{entry.text}</p>
+        <p><TypewriterText text={entry.text} active={Boolean(entry.streaming)} /></p>
       </div>
     </article>
+  );
+}
+
+function TypewriterText({ text, active }: { text: string; active: boolean }) {
+  return (
+    <>
+      {text}
+      {active && <span className="typing-caret" aria-hidden="true" />}
+    </>
   );
 }
 
@@ -845,28 +892,69 @@ function decisionLabel(decision: unknown) {
   return ({ accept: '允许一次', acceptForSession: '本次会话允许', decline: '拒绝', cancel: '拒绝并停止' } as Record<string, string>)[value] ?? value;
 }
 
-function groupThreadsByProject(threads: CodexThreadSummary[]): ThreadProjectGroup[] {
-  const groups = new Map<string, ThreadProjectGroup>();
-  for (const thread of threads) {
-    const key = projectKey(thread.cwd);
-    const existing = groups.get(key);
-    if (existing) {
-      existing.threads.push(thread);
+function buildThreadNavigation(
+  threads: CodexThreadSummary[],
+  projects: CodexProjectSummary[],
+): ThreadNavigation {
+  const groups = projects
+    .map<ProjectNavigationGroup>((project) => ({
+      key: project.projectId,
+      name: project.name,
+      cwd: project.roots[0],
+      position: project.position,
+      threads: [],
+    }))
+    .sort((left, right) => left.position - right.position || left.name.localeCompare(right.name));
+  const projectsById = new Map(groups.map((group) => [group.key, group]));
+  const recent: CodexThreadSummary[] = [];
+  const cwdProjects = new Map<string, ProjectNavigationGroup>();
+  for (const thread of [...threads].sort(compareThreadRecency)) {
+    const project = thread.projectId ? projectsById.get(thread.projectId) : undefined;
+    if (project) {
+      project.threads.push(thread);
       continue;
     }
 
-    groups.set(key, {
-      key,
-      name: projectName(thread.cwd),
-      cwd: thread.cwd,
-      threads: [thread],
-    });
+    if (thread.cwd && !isCodexGeneratedSessionDirectory(thread.cwd)) {
+      const key = `cwd:${normalizeProjectPath(thread.cwd)}`;
+      let cwdProject = cwdProjects.get(key);
+      if (!cwdProject) {
+        cwdProject = {
+          key,
+          name: projectName(thread.cwd),
+          cwd: thread.cwd,
+          position: 1_000_000 + cwdProjects.size,
+          threads: [],
+        };
+        cwdProjects.set(key, cwdProject);
+        groups.push(cwdProject);
+      }
+      cwdProject.threads.push(thread);
+      continue;
+    }
+
+    recent.push(thread);
   }
-  return [...groups.values()];
+
+  for (const project of groups) project.threads.sort(compareThreadRecency);
+  recent.sort(compareThreadRecency);
+  return { projects: groups, recent };
 }
 
-function projectKey(cwd?: string) {
-  if (!cwd?.trim()) return '__unknown_project__';
+function compareThreadRecency(left: CodexThreadSummary, right: CodexThreadSummary) {
+  return threadRecency(right) - threadRecency(left)
+    || (left.name ?? left.preview ?? '').localeCompare(right.name ?? right.preview ?? '');
+}
+
+function threadRecency(thread: CodexThreadSummary) {
+  return thread.recencyAt ?? thread.updatedAt ?? thread.createdAt ?? 0;
+}
+
+function isCodexGeneratedSessionDirectory(cwd: string) {
+  return /[\\/]Documents[\\/]Codex[\\/]20\d{2}-\d{2}-\d{2}[\\/]/iu.test(cwd);
+}
+
+function normalizeProjectPath(cwd: string) {
   const normalized = cwd.trim().replaceAll('/', '\\').replace(/\\+$/u, '');
   return /^[a-z]:\\/iu.test(normalized) || normalized.startsWith('\\\\')
     ? normalized.toLocaleLowerCase()
@@ -910,6 +998,9 @@ function buildChatEntries(events: CodexEvent[], snapshot: CodexSnapshot | undefi
     switch (event.kind) {
       case 'AgentMessageCompleted':
         if (text) entries.push({ id: event.eventId, role: 'assistant', text });
+        break;
+      case 'AgentMessageDelta':
+        if (text) entries.push({ id: event.eventId, role: 'assistant', text, meta: '实时回复', streaming: true });
         break;
       case 'CommandStarted':
       case 'CommandCompleted':

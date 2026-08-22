@@ -169,8 +169,17 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
                                     "D:\\Projects\\SystemTest",
                                     DateTimeOffset.UtcNow.AddHours(-2).ToUnixTimeSeconds(),
                                     DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeSeconds(),
+                                    DateTimeOffset.UtcNow.AddMinutes(-30).ToUnixTimeSeconds(),
                                     "notLoaded",
-                                    "appServer"),
+                                    "appServer",
+                                    "project-system"),
+                            ],
+                            [
+                                new CodexProjectSummaryPayload(
+                                    "project-system",
+                                    "SystemTest",
+                                    0,
+                                    ["D:\\Projects\\SystemTest"]),
                             ],
                             null),
                             RelayJson.Options),

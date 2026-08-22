@@ -13,7 +13,7 @@ Codex Control 是 Codex Session 的控制面，不是 OpenAI 身份或模型代�
 - 将 Codex JSON-RPC 规范化为 Snapshot/Domain Event；
 - 通过自托管 Relay 连接多个 Device 和 Controller；
 - 执行 Steer、Interrupt、Approval 和状态恢复。
-- 列出本机 Codex 历史、按项目折叠、读取历史消息、创建 Thread、恢复历史 Thread 并启动真实 Turn。
+- 列出本机 Codex 历史、按项目/最近分区和 `recencyAt` 排序、读取历史消息、创建 Thread、恢复历史 Thread 并启动真实 Turn。
 
 它不负责：
 
@@ -250,7 +250,9 @@ Relay 不持久化完整事件流，只保存最新 Snapshot 和必要审计元�
 - 解除配对；
 - Service Worker 与 Manifest。
 
-侧栏只对包含两个及以上会话的项目显示折叠标题；单会话直接显示。每个已识别 `cwd` 都提供项目内新建入口。侧栏、消息流和 Composer 分属独立布局行，长历史不能扩张页面或把 Composer 推出视口。
+侧栏优先使用 `project/list.position` 与 `thread.projectId`；当前 Desktop 返回空项目目录时，真实工作 `cwd` 兼容为项目，`Documents\Codex\YYYY-MM-DD` 自动会话目录归入“最近”。项目行有文件夹图标和项目内新建入口；“最近”任务直接显示且没有“＋”。项目内与最近任务均按 `recencyAt` 降序。侧栏、消息流和 Composer 分属独立布局行。
+
+`item/agentMessage/delta` 被规范化为 `AgentMessageDelta`，PWA 按 `itemId` 合并到同一助手消息并立即显示；闪烁光标提供打字机反馈。`AgentMessageCompleted` 用最终正文替换流式条目，`TurnCompleted` 后在后台刷新历史和侧栏，不遮挡当前 Composer。
 
 同一浏览器身份可以同时打开多个标签页。Relay 为 Device 保留单连接替换语义，但按 `controllerId + connectionId` 保存全部 Controller 页面；Presence、Snapshot、Event 和 Control Result 会发送给该 Controller 身份的所有活动页面，未发起请求的页面会忽略不匹配的 `requestId`。
 

@@ -23,22 +23,20 @@ public sealed record AgentOptions(
 
     public static AgentOptions Parse(IReadOnlyList<string> args)
     {
+        var paths = AgentDataPaths.FromApplicationDirectory();
         var codexPath = Environment.GetEnvironmentVariable("CODEX_CONTROL_CODEX_PATH") ?? "codex";
         var port = DefaultPort;
-        var logDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CodexControl",
-            "logs");
+        var logDirectory = paths.LogDirectory;
         var maxMessageBytes = DefaultMaxMessageBytes;
         var relayUrlText = Environment.GetEnvironmentVariable("CODEX_CONTROL_RELAY_URL");
         var deviceName = Environment.MachineName;
-        var dataDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CodexControl");
+        var dataDirectory = paths.DataDirectory;
         var createPairing = false;
         var allowInsecureRelay = false;
         var probeOnly = false;
         var showHelp = false;
+        var dataDirectoryOverridden = false;
+        var logDirectoryOverridden = false;
 
         for (var index = 0; index < args.Count; index++)
         {
@@ -56,6 +54,7 @@ public sealed record AgentOptions(
                     break;
                 case "--log-dir":
                     logDirectory = ReadValue(args, ref index, "--log-dir");
+                    logDirectoryOverridden = true;
                     break;
                 case "--max-message-bytes":
                     maxMessageBytes = ParseInteger(
@@ -72,6 +71,7 @@ public sealed record AgentOptions(
                     break;
                 case "--data-dir":
                     dataDirectory = ReadValue(args, ref index, "--data-dir");
+                    dataDirectoryOverridden = true;
                     break;
                 case "--pair":
                     createPairing = true;
@@ -127,6 +127,11 @@ public sealed record AgentOptions(
             throw new AgentConfigurationException("--pair 必须与 --relay-url 一起使用。");
         }
 
+        if (dataDirectoryOverridden && !logDirectoryOverridden)
+        {
+            logDirectory = Path.Combine(dataDirectory, "logs");
+        }
+
         return new AgentOptions(
             codexPath.Trim(),
             port,
@@ -139,6 +144,32 @@ public sealed record AgentOptions(
             allowInsecureRelay,
             probeOnly,
             showHelp);
+    }
+
+    public static AgentOptions FromSettings(AgentSettings settings, AgentDataPaths paths)
+    {
+        var validated = settings.Validate();
+        var relayUrl = string.IsNullOrWhiteSpace(validated.RelayRootUrl)
+            ? null
+            : new Uri(validated.RelayRootUrl, UriKind.Absolute);
+        var codexPath = validated.CodexPathMode == CodexPathMode.Manual
+            ? validated.CodexPath!
+            : Environment.GetEnvironmentVariable("CODEX_CONTROL_CODEX_PATH") ?? "codex";
+        var port = validated.LocalPortMode == LocalPortMode.Fixed
+            ? validated.FixedPort!.Value
+            : 0;
+        return new AgentOptions(
+            codexPath,
+            port,
+            paths.LogDirectory,
+            DefaultMaxMessageBytes,
+            relayUrl,
+            validated.DeviceName,
+            paths.DataDirectory,
+            CreatePairing: false,
+            AllowInsecureRelay: relayUrl?.Scheme == Uri.UriSchemeHttp,
+            ProbeOnly: false,
+            ShowHelp: false);
     }
 
     public static AgentOptions ForTests(string codexPath, string logDirectory, int port = 0) =>
@@ -159,7 +190,9 @@ public sealed record AgentOptions(
         CodexControlAgent
 
         用法：
-          CodexControlAgent.exe [options]
+          CodexControlAgent.exe                 打开托盘和设置窗口
+          CodexControlAgent.exe --background    静默进入托盘
+          CodexControlAgent.exe --headless [options]
 
         参数：
           --codex-path <path>        可执行的 Codex CLI 路径；默认也自动发现 Codex Desktop 运行时
@@ -171,6 +204,8 @@ public sealed record AgentOptions(
           --data-dir <path>          DPAPI 身份和本地状态目录
           --pair                     连接 Relay 后创建并显示三分钟配对码
           --allow-insecure-relay     仅本地开发允许 ws/http Relay
+          --headless                 使用命令行模式；参数只影响当前进程
+          --background               GUI 模式静默进入托盘
           --probe-only               只验证 Codex CLI/app-server 能力，不启动 Agent
           -h, --help                 显示帮助
 

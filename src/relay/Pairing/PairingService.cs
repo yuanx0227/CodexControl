@@ -10,13 +10,24 @@ using Microsoft.EntityFrameworkCore;
 namespace CodexControl.Relay.Pairing;
 
 public sealed record PairingClaimResult(
+    string PairingRequestId,
     string DeviceId,
     string ControllerId,
-    PairingPermissions Permissions);
+    string ControllerName,
+    string PublicKeyFingerprint,
+    long ExpiresAt);
+
+public sealed record PairingResolveResult(
+    string PairingRequestId,
+    string DeviceId,
+    string ControllerId,
+    PairingPermissions Permissions,
+    bool Allowed);
 
 public sealed class PairingService
 {
     private static readonly TimeSpan PairingTtl = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan ConfirmationTtl = TimeSpan.FromSeconds(60);
     private const int MaxAttempts = 5;
 
     private readonly IDbContextFactory<RelayDbContext> _dbFactory;
@@ -154,68 +165,248 @@ public sealed class PairingService
             return ServiceResult<PairingClaimResult>.Failure("PAIRING_INVALID", "Pairing proof is invalid.");
         }
 
-        var controller = await db.Controllers.SingleOrDefaultAsync(
-            value => value.Id == payload.ControllerId,
-            cancellationToken).ConfigureAwait(false);
-        if (controller is null)
+        var requestId = string.Concat("preq_", Guid.NewGuid().ToString("N"));
+        var confirmationExpiresAt = now + ConfirmationTtl;
+        db.PairingRequests.Add(new PairingRequestEntity
         {
-            controller = new ControllerEntity
-            {
-                Id = payload.ControllerId,
-                Name = payload.ControllerName,
-                PublicKey = payload.PublicKey,
-                CreatedAt = now,
-                LastSeenAt = now,
-            };
-            db.Controllers.Add(controller);
-        }
-        else if (!KeysEqual(controller.PublicKey, payload.PublicKey) || controller.RevokedAt is not null)
-        {
-            return ServiceResult<PairingClaimResult>.Failure(
-                "CONTROLLER_IDENTITY_CONFLICT",
-                "Controller ID is registered with another key or revoked.");
-        }
-        else
-        {
-            controller.Name = payload.ControllerName;
-            controller.LastSeenAt = now;
-        }
-
-        var pairing = await db.Pairings.SingleOrDefaultAsync(
-            value => value.DeviceId == session.DeviceId && value.ControllerId == payload.ControllerId,
-            cancellationToken).ConfigureAwait(false);
-        if (pairing is null)
-        {
-            pairing = new PairingEntity
-            {
-                DeviceId = session.DeviceId,
-                ControllerId = payload.ControllerId,
-                CreatedAt = now,
-            };
-            db.Pairings.Add(pairing);
-        }
-
-        pairing.RevokedAt = null;
-        pairing.ViewPermission = true;
-        pairing.SteerPermission = true;
-        pairing.InterruptPermission = true;
-        pairing.ApprovalPermission = true;
+            Id = requestId,
+            SessionId = session.Id,
+            DeviceId = session.DeviceId,
+            ControllerId = payload.ControllerId,
+            ControllerName = payload.ControllerName,
+            PublicKey = payload.PublicKey,
+            CreatedAt = now,
+            ExpiresAt = confirmationExpiresAt,
+        });
         session.ConsumedAt = now;
         db.AuditEvents.Add(new AuditEventEntity
         {
             EventType = RelayMessageTypes.PairingClaim,
             DeviceId = session.DeviceId,
             ControllerId = payload.ControllerId,
-            Outcome = "completed",
+            RequestId = requestId,
+            Outcome = "pending",
             CreatedAt = now,
         });
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return ServiceResult<PairingClaimResult>.Success(new(
+            requestId,
             session.DeviceId,
             payload.ControllerId,
-            PairingPermissions.Full));
+            payload.ControllerName,
+            Fingerprint(payload.PublicKey),
+            confirmationExpiresAt.ToUnixTimeMilliseconds()));
+    }
+
+    public async Task<ServiceResult<PairingResolveResult>> ResolveAsync(
+        string deviceId,
+        PairingConfirmationResolvePayload payload,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var now = DateTimeOffset.UtcNow;
+        var request = await db.PairingRequests.SingleOrDefaultAsync(
+            value => value.Id == payload.PairingRequestId && value.DeviceId == deviceId,
+            cancellationToken).ConfigureAwait(false);
+        if (request is null || request.ResolvedAt is not null)
+        {
+            return ServiceResult<PairingResolveResult>.Failure("PAIRING_REQUEST_NOT_FOUND", "Pairing request was not found.");
+        }
+
+        if (request.ExpiresAt <= now)
+        {
+            request.ResolvedAt = now;
+            request.Outcome = "expired";
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return ServiceResult<PairingResolveResult>.Failure("PAIRING_REQUEST_EXPIRED", "Pairing confirmation expired.");
+        }
+
+        if (payload.Decision == PairingDecision.Deny)
+        {
+            request.ResolvedAt = now;
+            request.Outcome = "denied";
+            db.AuditEvents.Add(new AuditEventEntity
+            {
+                EventType = RelayMessageTypes.PairingConfirmationResolve,
+                DeviceId = deviceId,
+                ControllerId = request.ControllerId,
+                RequestId = request.Id,
+                Outcome = "denied",
+                CreatedAt = now,
+            });
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return ServiceResult<PairingResolveResult>.Success(new(
+                request.Id,
+                deviceId,
+                request.ControllerId,
+                PairingPermissions.ViewOnly,
+                Allowed: false));
+        }
+
+        var controller = await db.Controllers.SingleOrDefaultAsync(
+            value => value.Id == request.ControllerId,
+            cancellationToken).ConfigureAwait(false);
+        if (controller is null)
+        {
+            controller = new ControllerEntity
+            {
+                Id = request.ControllerId,
+                Name = request.ControllerName,
+                PublicKey = request.PublicKey,
+                CreatedAt = now,
+                LastSeenAt = now,
+            };
+            db.Controllers.Add(controller);
+        }
+        else if (!KeysEqual(controller.PublicKey, request.PublicKey) || controller.RevokedAt is not null)
+        {
+            return ServiceResult<PairingResolveResult>.Failure(
+                "CONTROLLER_IDENTITY_CONFLICT",
+                "Controller ID is registered with another key or revoked.");
+        }
+        else
+        {
+            controller.Name = request.ControllerName;
+            controller.LastSeenAt = now;
+        }
+
+        var pairing = await db.Pairings.SingleOrDefaultAsync(
+            value => value.DeviceId == deviceId && value.ControllerId == request.ControllerId,
+            cancellationToken).ConfigureAwait(false);
+        if (pairing is null)
+        {
+            pairing = new PairingEntity
+            {
+                DeviceId = deviceId,
+                ControllerId = request.ControllerId,
+                CreatedAt = now,
+            };
+            db.Pairings.Add(pairing);
+        }
+
+        var permissions = PairingPermissions.FromProfile(payload.PermissionProfile);
+        ApplyPermissions(pairing, permissions);
+        pairing.RevokedAt = null;
+        request.ResolvedAt = now;
+        request.Outcome = "allowed";
+        db.AuditEvents.Add(new AuditEventEntity
+        {
+            EventType = RelayMessageTypes.PairingConfirmationResolve,
+            DeviceId = deviceId,
+            ControllerId = request.ControllerId,
+            RequestId = request.Id,
+            Outcome = payload.PermissionProfile == PairingPermissionProfile.Full ? "allowed-full" : "allowed-view",
+            CreatedAt = now,
+        });
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return ServiceResult<PairingResolveResult>.Success(new(
+            request.Id,
+            deviceId,
+            request.ControllerId,
+            permissions,
+            Allowed: true));
+    }
+
+    public async Task<IReadOnlyList<PairedControllerSummaryPayload>> ListControllersAsync(
+        string deviceId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await db.Pairings.AsNoTracking()
+            .Where(value => value.DeviceId == deviceId)
+            .OrderBy(value => value.Controller.Name)
+            .Select(value => new PairedControllerSummaryPayload(
+                value.Id,
+                value.ControllerId,
+                value.Controller.Name,
+                value.Alias,
+                new PairingPermissions(
+                    value.ViewPermission,
+                    value.SteerPermission,
+                    value.InterruptPermission,
+                    value.ApprovalPermission),
+                value.Controller.LastSeenAt == null ? null : value.Controller.LastSeenAt.Value.ToUnixTimeMilliseconds(),
+                value.RevokedAt != null))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<ServiceResult<PairingUpdatedPayload>> UpdateAsync(
+        string deviceId,
+        PairingUpdatePayload payload,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var pairing = await db.Pairings.SingleOrDefaultAsync(
+            value => value.Id == payload.PairingId && value.DeviceId == deviceId && value.RevokedAt == null,
+            cancellationToken).ConfigureAwait(false);
+        if (pairing is null)
+        {
+            return ServiceResult<PairingUpdatedPayload>.Failure("PAIRING_NOT_FOUND", "Pairing was not found.");
+        }
+
+        var alias = string.IsNullOrWhiteSpace(payload.Alias) ? null : payload.Alias.Trim();
+        if (alias?.Length > 200)
+        {
+            return ServiceResult<PairingUpdatedPayload>.Failure("PAIRING_ALIAS_INVALID", "Pairing alias is too long.");
+        }
+
+        var permissions = PairingPermissions.FromProfile(payload.PermissionProfile);
+        pairing.Alias = alias;
+        ApplyPermissions(pairing, permissions);
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return ServiceResult<PairingUpdatedPayload>.Success(new(pairing.Id, alias, permissions));
+    }
+
+    public async Task<bool> RevokeByIdAsync(
+        string deviceId,
+        long pairingId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var pairing = await db.Pairings.SingleOrDefaultAsync(
+            value => value.Id == pairingId && value.DeviceId == deviceId && value.RevokedAt == null,
+            cancellationToken).ConfigureAwait(false);
+        if (pairing is null)
+        {
+            return false;
+        }
+
+        pairing.RevokedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    public async Task<IReadOnlyList<string>> CancelForDeviceAsync(
+        string deviceId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var now = DateTimeOffset.UtcNow;
+        var sessions = await db.PairingSessions
+            .Where(value => value.DeviceId == deviceId && value.ConsumedAt == null)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var session in sessions)
+        {
+            session.ConsumedAt = now;
+        }
+
+        var requests = await db.PairingRequests
+            .Where(value => value.DeviceId == deviceId && value.ResolvedAt == null)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var request in requests)
+        {
+            request.ResolvedAt = now;
+            request.Outcome = "device-offline";
+        }
+
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return requests.Select(value => value.Id).ToArray();
     }
 
     public async Task<PairingEntity?> GetActivePairingAsync(
@@ -308,6 +499,7 @@ public sealed class PairingService
                 PairingProofCanonicalPayload.Build(
                     payload.Code,
                     payload.ControllerId,
+                    payload.ControllerName,
                     payload.PublicKey,
                     payload.ProofNonce),
                 payload.ProofSignature);
@@ -332,5 +524,19 @@ public sealed class PairingService
         {
             return false;
         }
+    }
+
+    private static string Fingerprint(string publicKey)
+    {
+        var digest = SHA256.HashData(Base64Url.Decode(publicKey));
+        return Convert.ToHexString(digest.AsSpan(0, 6));
+    }
+
+    private static void ApplyPermissions(PairingEntity pairing, PairingPermissions permissions)
+    {
+        pairing.ViewPermission = permissions.View;
+        pairing.SteerPermission = permissions.Steer;
+        pairing.InterruptPermission = permissions.Interrupt;
+        pairing.ApprovalPermission = permissions.Approval;
     }
 }

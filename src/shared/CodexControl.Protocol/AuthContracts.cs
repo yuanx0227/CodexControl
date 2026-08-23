@@ -23,7 +23,8 @@ public sealed record AuthResponsePayload(
 public sealed record AuthOkPayload(
     PrincipalRole Role,
     string PrincipalId,
-    string ConnectionId);
+    string ConnectionId,
+    string? ServerVersion = null);
 
 public sealed record PublicIdentityPayload(
     string PrincipalId,

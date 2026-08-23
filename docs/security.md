@@ -11,6 +11,7 @@
 ### Codex Desktop 运行时
 
 - 不附加、读取或控制 Desktop 已打开的会话；
+- Desktop 外部会话不通过文件监视、私有 IPC 或 UI 抓取伪造实时订阅；
 - PATH 不可用时只从当前用户 AppX Package Repository 读取 `OpenAI.Codex_*` 的 `PackageRootFolder`；
 - 严格校验目标仍位于 `WindowsApps\OpenAI.Codex_*`，只接受固定四个运行时文件；
 - 运行时只复制到当前用户数据目录，不修改 WindowsApps；
@@ -69,6 +70,13 @@ Challenge：
 - 活动 Code Lookup 与最终验证使用不同 HMAC 域；
 - 数据库不保存明文 Code；
 - Migration 无法重建旧 Lookup HMAC 时安全失效旧 Pairing Session。
+- QR 内容只在 URL fragment 中携带 Relay 根地址和一次性码，PWA 读取后立即清除地址栏；
+- v2 Proof 绑定 Controller Name，防止中途替换显示身份；
+- 首个有效 Claim 消耗 Code，但只创建 60 秒 Pending Request；
+- 只有电脑本机明确 Allow 后才创建 Pairing；Deny、超时、暂停和 Device 断线均不授权；
+- 系统通知只能打开确认页，不能直接批准；
+- Device 认证后先同步持久化撤销项，完成后发送 `device.ready`，Ready 前不发布 Online 或路由 Control；
+- ViewOnly 只有 `view`，Full 才拥有 `steer/interrupt/approval`。
 
 ## 5. Authorization
 
@@ -88,7 +96,10 @@ approval
 - 新会话目录必须是 Device 上真实存在的绝对路径；
 - 创建/恢复强制 `approvalPolicy=untrusted` 与 `workspace-write` sandbox；
 - 活动 Turn 存在时拒绝创建或恢复另一会话；
-- Relay 只实时转发历史摘要和任务文本，不持久化其正文。
+- Relay 只实时转发历史摘要、任务文本、Turn 时间和有界图片缩略图，不持久化其正文或图片；
+- PWA 已读回执只保存 Thread ID、活动时间、状态和已读时间，不保存新的正文副本；
+- `localImage` 必须是本机绝对路径、允许的图片扩展和受限文件/像素大小；DTO 不下发绝对路径；
+- PWA Markdown 不启用原始 HTML，图片附件只接受协议提供且 MIME 匹配的 `data:image`。
 
 ## 6. Approval
 

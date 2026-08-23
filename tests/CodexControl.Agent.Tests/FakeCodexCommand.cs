@@ -236,12 +236,45 @@ internal static class FakeCodexCommand
                         {
                           "turnId":"turn-history-1",
                           "item":{
+                            "id":"item-history-file",
+                            "type":"fileChange",
+                            "status":"completed",
+                            "changes":[{
+                              "path":"src/LoginService.cs",
+                              "kind":"update",
+                              "diff":"--- a/src/LoginService.cs\n+++ b/src/LoginService.cs\n@@ -1,2 +1,3 @@\n-old\n+new\n+added"
+                            }]
+                          }
+                        },
+                        {
+                          "turnId":"turn-history-1",
+                          "item":{
                             "id":"item-history-user",
                             "type":"userMessage",
                             "content":[{"type":"text","text":"修复登录模块"}]
                           }
                         }
                       ],
+                      "nextCursor":null
+                    }
+                    """);
+                await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (method == "thread/turns/list")
+            {
+                using var resultDocument = JsonDocument.Parse("""
+                    {
+                      "data":[{
+                        "id":"turn-history-1",
+                        "status":"completed",
+                        "startedAt":1730831000,
+                        "completedAt":1730831096,
+                        "durationMs":96000,
+                        "items":[]
+                      }],
                       "nextCursor":null
                     }
                     """);

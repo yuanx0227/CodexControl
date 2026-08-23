@@ -38,6 +38,19 @@ public sealed class LocalCodexProxyServer : IAsyncDisposable
 
     public int BoundPort { get; private set; }
 
+    public bool HasActiveClient
+    {
+        get
+        {
+            lock (_sessionGate)
+            {
+                return _activeSession is not null;
+            }
+        }
+    }
+
+    public event Action<bool>? ClientConnectionChanged;
+
     public Uri WebSocketUri => BoundPort > 0
         ? new Uri($"ws://127.0.0.1:{BoundPort}/", UriKind.Absolute)
         : throw new InvalidOperationException("Local proxy 尚未启动。");
@@ -149,6 +162,7 @@ public sealed class LocalCodexProxyServer : IAsyncDisposable
             {
                 _activeSession = session;
             }
+            ClientConnectionChanged?.Invoke(true);
 
             try
             {
@@ -163,6 +177,7 @@ public sealed class LocalCodexProxyServer : IAsyncDisposable
                         _activeSession = null;
                     }
                 }
+                ClientConnectionChanged?.Invoke(false);
             }
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)

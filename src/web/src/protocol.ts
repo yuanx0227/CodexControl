@@ -1,7 +1,7 @@
 export { MessageType } from './messageTypes.generated';
 
 export interface RelayEnvelope<T = unknown> {
-  version: 1;
+  version: 2;
   type: string;
   messageId: string;
   requestId?: string;
@@ -21,12 +21,14 @@ export interface AuthOk {
   role: 'controller';
   principalId: string;
   connectionId: string;
+  serverVersion?: string;
 }
 
 export interface PairingCompleted {
   deviceId: string;
   controllerId: string;
   permissions: PairingPermissions;
+  serverVersion?: string;
 }
 
 export interface PairingPermissions {
@@ -50,6 +52,7 @@ export interface CodexSnapshot {
   pendingApprovalCount: number;
   lastAgentMessage?: string;
   lastError?: string;
+  agentVersion?: string;
 }
 
 export interface DeviceSummary {
@@ -93,9 +96,33 @@ export interface CodexThreadListResult {
 export interface CodexThreadHistoryEntry {
   itemId: string;
   turnId: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'tool';
   text: string;
   phase?: string;
+  attachments: CodexThreadHistoryAttachment[];
+  changes?: CodexThreadHistoryFileChange[];
+}
+
+export interface CodexThreadHistoryAttachment {
+  kind: 'image';
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+}
+
+export interface CodexThreadHistoryFileChange {
+  path: string;
+  kind?: string;
+  additions?: number;
+  deletions?: number;
+}
+
+export interface CodexTurnTiming {
+  turnId: string;
+  status?: string;
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
 }
 
 export interface CodexThreadReadResult {
@@ -103,6 +130,7 @@ export interface CodexThreadReadResult {
   name?: string;
   cwd?: string;
   entries: CodexThreadHistoryEntry[];
+  turns: CodexTurnTiming[];
   truncated: boolean;
 }
 
@@ -153,7 +181,7 @@ export function createEnvelope<T>(
   options: { requestId?: string; deviceId?: string; controllerId?: string } = {},
 ): RelayEnvelope<T> {
   return {
-    version: 1,
+    version: 2,
     type,
     messageId: crypto.randomUUID(),
     requestId: options.requestId,

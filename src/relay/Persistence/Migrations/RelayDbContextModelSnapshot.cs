@@ -124,6 +124,9 @@ namespace CodexControl.Relay.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("Alias")
+                        .HasColumnType("TEXT");
+
                     b.Property<bool>("ApprovalPermission")
                         .HasColumnType("INTEGER");
 
@@ -158,6 +161,59 @@ namespace CodexControl.Relay.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("Pairings");
+                });
+
+            modelBuilder.Entity("CodexControl.Relay.Persistence.PairingRequestEntity", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ControllerId")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ControllerName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DeviceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Outcome")
+                        .HasMaxLength(40)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PublicKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset?>("ResolvedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SessionId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeviceId");
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.HasIndex("SessionId")
+                        .IsUnique();
+
+                    b.ToTable("PairingRequests");
                 });
 
             modelBuilder.Entity("CodexControl.Relay.Persistence.PairingSessionEntity", b =>

@@ -3,6 +3,7 @@ using CodexControl.Agent.Codex;
 using CodexControl.Agent.Configuration;
 using CodexControl.Agent.Control;
 using CodexControl.Agent.Diagnostics;
+using CodexControl.Agent.Desktop;
 using CodexControl.Agent.Proxy;
 using CodexControl.Agent.Relay;
 using CodexControl.Agent.Security;
@@ -15,6 +16,21 @@ public static class AgentProgram
     private static readonly int[] AppServerRestartSeconds = [1, 2, 5, 10, 30];
 
     public static async Task<int> RunAsync(string[] args)
+    {
+        var startHidden = args.Length == 1 && string.Equals(args[0], "--background", StringComparison.Ordinal);
+        if (args.Length == 0 || startHidden)
+        {
+            return AgentDesktopApplication.Run(startHidden);
+        }
+
+        ConsoleBridge.AttachToParent();
+        var headlessArgs = args
+            .Where(static argument => !string.Equals(argument, "--headless", StringComparison.Ordinal))
+            .ToArray();
+        return await RunHeadlessAsync(headlessArgs).ConfigureAwait(false);
+    }
+
+    private static async Task<int> RunHeadlessAsync(string[] args)
     {
         AgentOptions options;
         try

@@ -40,13 +40,35 @@ public sealed record CodexThreadHistoryEntryPayload(
     string TurnId,
     string Role,
     string Text,
-    string? Phase);
+    string? Phase,
+    IReadOnlyList<CodexThreadHistoryAttachmentPayload> Attachments,
+    IReadOnlyList<CodexThreadHistoryFileChangePayload> Changes);
+
+public sealed record CodexThreadHistoryAttachmentPayload(
+    string Kind,
+    string Name,
+    string MimeType,
+    string DataUrl);
+
+public sealed record CodexThreadHistoryFileChangePayload(
+    string Path,
+    string? Kind,
+    int? Additions,
+    int? Deletions);
+
+public sealed record CodexTurnTimingPayload(
+    string TurnId,
+    string? Status,
+    long? StartedAt,
+    long? CompletedAt,
+    long? DurationMs);
 
 public sealed record CodexThreadReadResultPayload(
     string ThreadId,
     string? Name,
     string? Cwd,
     IReadOnlyList<CodexThreadHistoryEntryPayload> Entries,
+    IReadOnlyList<CodexTurnTimingPayload> Turns,
     bool Truncated);
 
 public sealed record CodexThreadActionResultPayload(
@@ -66,7 +88,8 @@ public sealed record CodexSnapshotPayload(
     IReadOnlyList<string> ChangedFiles,
     int PendingApprovalCount,
     string? LastAgentMessage,
-    string? LastError);
+    string? LastError,
+    string? AgentVersion = null);
 
 public sealed record CodexEventPayload(
     string EventId,

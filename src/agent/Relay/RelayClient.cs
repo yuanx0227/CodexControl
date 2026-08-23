@@ -26,6 +26,8 @@ public sealed class RelayClient : IAsyncDisposable
     private readonly AppServerBridge _bridge;
     private readonly RemoteControlDispatcher _dispatcher;
     private readonly AgentLog _log;
+    private readonly IReadOnlyList<PendingPairingRevocation> _preReadyRevocations;
+    private readonly Action<long>? _revocationSynchronized;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly TaskCompletionSource<bool> _firstAuthenticated =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -45,7 +47,9 @@ public sealed class RelayClient : IAsyncDisposable
         CodexStateManager state,
         AppServerBridge bridge,
         RemoteControlDispatcher dispatcher,
-        AgentLog log)
+        AgentLog log,
+        IReadOnlyList<PendingPairingRevocation>? preReadyRevocations = null,
+        Action<long>? revocationSynchronized = null)
     {
         _options = options;
         _identity = identity;
@@ -53,6 +57,8 @@ public sealed class RelayClient : IAsyncDisposable
         _bridge = bridge;
         _dispatcher = dispatcher;
         _log = log;
+        _preReadyRevocations = preReadyRevocations ?? [];
+        _revocationSynchronized = revocationSynchronized;
         _latestSnapshot = MapSnapshot(state.Snapshot);
         _state.SnapshotChanged += OnSnapshotChanged;
         _bridge.ServerMessageReceived += OnServerMessage;
@@ -74,6 +80,8 @@ public sealed class RelayClient : IAsyncDisposable
     public Task WaitUntilAuthenticatedAsync(CancellationToken cancellationToken) =>
         _firstAuthenticated.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
 
+    public event Action<PairingConfirmationRequestedPayload>? PairingConfirmationRequested;
+
     public async Task<PairingCreatedPayload> CreatePairingAsync(CancellationToken cancellationToken)
     {
         var response = await SendRequestAsync(
@@ -87,6 +95,43 @@ public sealed class RelayClient : IAsyncDisposable
         }
 
         return response.ReadPayload<PairingCreatedPayload>();
+    }
+
+    public async Task<RelayEnvelope> ResolvePairingAsync(
+        PairingConfirmationResolvePayload payload,
+        CancellationToken cancellationToken) =>
+        await SendRequestAsync(
+            RelayMessageTypes.PairingConfirmationResolve,
+            payload,
+            cancellationToken).ConfigureAwait(false);
+
+    public async Task<PairingListResultPayload> ListPairingsAsync(CancellationToken cancellationToken)
+    {
+        var response = await SendRequestAsync(
+            RelayMessageTypes.PairingList,
+            new PairingListPayload(),
+            cancellationToken).ConfigureAwait(false);
+        return response.ReadPayload<PairingListResultPayload>();
+    }
+
+    public async Task<PairingUpdatedPayload> UpdatePairingAsync(
+        PairingUpdatePayload payload,
+        CancellationToken cancellationToken)
+    {
+        var response = await SendRequestAsync(
+            RelayMessageTypes.PairingUpdate,
+            payload,
+            cancellationToken).ConfigureAwait(false);
+        return response.ReadPayload<PairingUpdatedPayload>();
+    }
+
+    public async Task RevokePairingAsync(long pairingId, CancellationToken cancellationToken)
+    {
+        var response = await SendRequestAsync(
+            RelayMessageTypes.PairingRevoke,
+            new PairingRevokePayload(pairingId),
+            cancellationToken).ConfigureAwait(false);
+        _ = response.ReadPayload<PairingRevokedPayload>();
     }
 
     public async ValueTask DisposeAsync()
@@ -169,6 +214,26 @@ public sealed class RelayClient : IAsyncDisposable
 
         await RegisterAsync(socket, cancellationToken).ConfigureAwait(false);
         var auth = await AuthenticateAsync(socket, cancellationToken).ConfigureAwait(false);
+        foreach (var pending in _preReadyRevocations)
+        {
+            await SendDirectAsync(socket, RelayEnvelope.Create(
+                RelayMessageTypes.PairingRevoke,
+                new PairingRevokePayload(pending.PairingId),
+                pending.RequestId,
+                _identity.DeviceId), cancellationToken).ConfigureAwait(false);
+            var revoked = await ReceiveDirectAsync(socket, cancellationToken).ConfigureAwait(false);
+            EnsureResponse(revoked, RelayMessageTypes.PairingRevoked, pending.RequestId);
+            _revocationSynchronized?.Invoke(pending.PairingId);
+        }
+
+        var readyRequestId = NewRequestId();
+        await SendDirectAsync(socket, RelayEnvelope.Create(
+            RelayMessageTypes.DeviceReady,
+            new { },
+            readyRequestId,
+            _identity.DeviceId), cancellationToken).ConfigureAwait(false);
+        var ready = await ReceiveDirectAsync(socket, cancellationToken).ConfigureAwait(false);
+        EnsureResponse(ready, RelayMessageTypes.DeviceReadyAck, readyRequestId);
         var outbound = Channel.CreateBounded<RelayEnvelope>(new BoundedChannelOptions(512)
         {
             SingleReader = true,
@@ -306,6 +371,26 @@ public sealed class RelayClient : IAsyncDisposable
                         {
                             _pairedControllers.Add(pairing.ControllerId);
                             _state.SetPairedControllerCount(_pairedControllers.Count);
+                        }
+
+                        break;
+                    }
+                case RelayMessageTypes.PairingConfirmationRequested:
+                    {
+                        var requested = envelope.ReadPayload<PairingConfirmationRequestedPayload>();
+                        var handlers = PairingConfirmationRequested;
+                        if (handlers is not null)
+                        {
+                            foreach (Action<PairingConfirmationRequestedPayload> handler in handlers.GetInvocationList())
+                            {
+                                try
+                                {
+                                    handler(requested);
+                                }
+                                catch
+                                {
+                                }
+                            }
                         }
 
                         break;
@@ -672,7 +757,8 @@ public sealed class RelayClient : IAsyncDisposable
         snapshot.ChangedFiles,
         snapshot.PendingApprovalCount,
         snapshot.LastAgentMessage,
-        snapshot.LastError);
+        snapshot.LastError,
+        typeof(RelayClient).Assembly.GetName().Version?.ToString(3));
 
     private static string NewRequestId() => string.Concat("req_", Guid.NewGuid().ToString("N"));
 }

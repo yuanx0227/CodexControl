@@ -8,6 +8,7 @@
 - Docker Desktop（部署验证）；
 - Codex Desktop 或可执行的 Codex CLI；
 - PowerShell 7。
+- Inno Setup 6（Release 安装包；可通过 `winget install JRSoftware.InnoSetup` 安装）。
 
 ## Build
 
@@ -70,7 +71,7 @@ CODEX_CONTROL_REAL_CODEX_PATH=<temp>\codex.exe
 CODEX_CONTROL_RUN_REAL_TURNS=1
 ```
 
-真实测试覆盖两组边界：审批测试创建 ephemeral Thread，使用随机 `out/approval-probe-*.txt` 作为审批目标并必须 Decline；远程会话测试创建一个 persisted Thread，验证历史列表、首个 Turn、恢复、第二个 Turn及分页能力探测/兼容回退返回的用户/助手消息，finally 只用 `thread/delete` 删除这个测试创建的 Thread。发布前还应杀掉专用验收 Agent 的 app-server 子进程，确认 Agent PID 不变且 localhost ready/Relay 认证自动恢复。
+真实测试覆盖两组边界：审批测试创建 ephemeral Thread，使用随机 `out/approval-probe-*.txt` 作为审批目标并必须 Decline；远程会话测试创建一个 persisted Thread，验证历史列表、首个 Turn、恢复、第二个 Turn、分页能力探测、`thread/turns/list` 状态/时间和兼容回退，finally 只用 `thread/delete` 删除这个测试创建的 Thread。Markdown/本地图片/过程摘要、文件行数统计、事件驱动输出、无周期历史读取、滚动锚点、运行/未读/完成未读状态和版本显示使用确定性 Agent 与 Playwright 测试覆盖；Desktop 外部会话必须显示不可订阅边界。
 
 ## Relay Migration
 
@@ -87,7 +88,7 @@ dotnet tool run dotnet-ef migrations add <Name> `
 ## One-hour soak
 
 ```powershell
-& '.\tests\CodexControl.Agent.Tests\bin\Release\net8.0\CodexControlAgentTests.exe' --soak 3600
+& '.\tests\CodexControl.Agent.Tests\bin\Release\net8.0-windows\CodexControlAgentTests.exe' --soak 3600
 ```
 
 循环覆盖：TUI initialize/list/close、Steer、Interrupt，以及每 60 轮 app-server/Proxy restart。
@@ -119,11 +120,16 @@ docker compose -f '.\deploy\docker-compose.yml' down -v
 
 ```text
 out/release/agent-win-x64/
+out/release/installer/CodexControl-Setup-UNSIGNED.exe
 out/release/relay/
 out/release/web/
 out/release/deploy/
 out/release/SHA256SUMS
 ```
+
+Agent/便携版的运行数据统一位于 `CodexControlAgent.exe` 同目录 `data\`。安装版默认位于
+`%LOCALAPPDATA%\Programs\CodexControl`；覆盖升级保留 `data\`，主动卸载默认删除但允许保留。
+未提供 `-SignToolCommand` 时，Release 明确生成 `UNSIGNED` 内部/测试安装包。
 
 ## Evidence boundary
 

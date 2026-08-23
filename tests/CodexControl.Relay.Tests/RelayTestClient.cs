@@ -37,7 +37,7 @@ internal sealed class RelayTestClient : IAsyncDisposable
         await _socket.ConnectAsync(endpoint, CancellationToken.None).ConfigureAwait(false);
     }
 
-    public async Task RegisterAndAuthenticateDeviceAsync()
+    public async Task RegisterAndAuthenticateDeviceAsync(bool markDeviceReady = true)
     {
         EnsureRole(PrincipalRole.Device);
         var registerId = NewRequestId();
@@ -47,10 +47,10 @@ internal sealed class RelayTestClient : IAsyncDisposable
             registerId,
             PrincipalId)).ConfigureAwait(false);
         _ = await ReceiveAsync(RelayMessageTypes.DeviceRegistered, registerId).ConfigureAwait(false);
-        await AuthenticateAsync().ConfigureAwait(false);
+        await AuthenticateAsync(markDeviceReady).ConfigureAwait(false);
     }
 
-    public async Task AuthenticateAsync()
+    public async Task AuthenticateAsync(bool markDeviceReady = true)
     {
         var requestId = NewRequestId();
         await SendAsync(RelayEnvelope.Create(
@@ -74,13 +74,29 @@ internal sealed class RelayTestClient : IAsyncDisposable
             Role == PrincipalRole.Device ? PrincipalId : null,
             Role == PrincipalRole.Controller ? PrincipalId : null)).ConfigureAwait(false);
         _ = await ReceiveAsync(RelayMessageTypes.AuthOk, requestId).ConfigureAwait(false);
+        if (Role == PrincipalRole.Device && markDeviceReady)
+        {
+            await MarkDeviceReadyAsync().ConfigureAwait(false);
+        }
+    }
+
+    public async Task MarkDeviceReadyAsync()
+    {
+        EnsureRole(PrincipalRole.Device);
+        var readyId = NewRequestId();
+        await SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.DeviceReady,
+            new { },
+            readyId,
+            PrincipalId)).ConfigureAwait(false);
+        _ = await ReceiveAsync(RelayMessageTypes.DeviceReadyAck, readyId).ConfigureAwait(false);
     }
 
     public PairingClaimPayload CreatePairingClaim(string code)
     {
         EnsureRole(PrincipalRole.Controller);
         var nonce = Base64Url.Encode(RandomNumberGenerator.GetBytes(32));
-        var canonical = PairingProofCanonicalPayload.Build(code, PrincipalId, PublicKey, nonce);
+        var canonical = PairingProofCanonicalPayload.Build(code, PrincipalId, Name, PublicKey, nonce);
         return new PairingClaimPayload(
             code,
             PrincipalId,

@@ -41,6 +41,7 @@ public sealed class RelayPeer : IAsyncDisposable
     public DateTimeOffset LastActivityAt =>
         DateTimeOffset.FromUnixTimeMilliseconds(Interlocked.Read(ref _lastActivityUnixMilliseconds));
     public bool IsAuthenticated => Role is not null && PrincipalId is not null;
+    public bool IsReady { get; private set; }
     public WebSocket Socket => _socket;
 
     public void Authenticate(PrincipalRole role, string principalId)
@@ -53,6 +54,17 @@ public sealed class RelayPeer : IAsyncDisposable
         Role = role;
         PrincipalId = principalId;
         PendingPrincipalId = null;
+        Touch();
+    }
+
+    public void MarkReady()
+    {
+        if (!IsAuthenticated || Role != PrincipalRole.Device)
+        {
+            throw new InvalidOperationException("Only an authenticated Device can become ready.");
+        }
+
+        IsReady = true;
         Touch();
     }
 

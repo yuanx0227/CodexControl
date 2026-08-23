@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.6.0 - 2026-08-23
+
+- Removed periodic full `control.thread.read` polling. Agent-managed sessions now update through app-server Domain Events over Relay WebSocket; completion performs one bounded reconciliation read.
+- Desktop-owned sessions are explicitly labeled as external/read-only because a standalone Agent cannot subscribe to another Desktop app-server process without unsupported attachment.
+- Added sidebar running, unread, completed-unread and failed-unread markers with timestamp-only read receipts.
+- Preserved scroll position while reading older messages and added an explicit new-message jump button.
+- Added Web, Relay, Agent and Protocol version information.
+
+## 0.5.4 - 2026-08-23
+
+- 修复页面先打开、Desktop Turn 后启动时的状态推断时钟死锁：活动判断改用当前墙钟，不再依赖尚未启动的运行计时器。
+- 增加“工作区已打开后再启动 Desktop Turn”回归测试，覆盖 Idle 到运行中、已运行时间和当前输出同步。
+
+## 0.5.3 - 2026-08-23
+
+- 选中会话不再依赖独立 Agent 自己的活动 Turn 才追平；空闲时每 2 秒、运行时每 0.8 秒读取公共 app-server 历史。
+- 历史 Turn DTO 保留 `status`，可识别由 Codex Desktop 拥有的活动 Turn，并显示“任务正在运行”。
+- 使用 Turn `startedAt` 每秒更新“已运行”时间；Desktop 所有的 Turn 保持只读，不错误开放 Steer 或停止。
+- 兼容跨 app-server 活动 Turn 暂时报 `interrupted`：最近开始、无 final_answer 且历史仍增长时按只读活动状态显示，45 秒无更新后自动过期。
+- 增加 Desktop 所有活动 Turn 的 Chromium/WebKit 回归测试，覆盖状态、计时和无刷新输出同步。
+
+## 0.5.2 - 2026-08-23
+
+- 文件变更摘要现在保留并显示每个影响文件的新增、删除行数和 Turn 汇总。
+- 活动 Turn 保持 WebSocket 实时增量，并每 1.2 秒从 app-server 轻量追平已完成条目，断线抖动或漏事件后无需手工刷新会话。
+- 增加 Agent diff 统计和 PWA 无刷新追平的回归测试。
+
+## 0.5.1 - 2026-08-23
+
+- Rendered assistant and user messages as safe GitHub-flavored Markdown without enabling raw HTML.
+- Added bounded local-image thumbnails to live thread reads without exposing absolute paths or persisting images in Relay.
+- Added historical and live Turn elapsed time from `thread/turns/list` and normalized Turn events.
+- Folded command and file activity into a default-collapsed per-Turn process summary.
+- Collapsed injected file/context metadata in user prompts while keeping the actual request visible.
+- Allowed an authenticated Controller with a removed Pairing to re-pair through a dedicated unauthenticated claim connection.
+- Rotated the PWA service-worker cache for immediate delivery of the rendering fixes.
+
+## 0.5.0 - 2026-08-23
+
+- Added the single-instance WinForms tray and four-page settings shell inside `CodexControlAgent.exe`.
+- Added schema-versioned atomic settings, DPAPI identity metadata updates, offline revocation state and a unified install-relative `data` directory.
+- Added the Runtime Coordinator, automatic loopback ports, one-click local TUI, remote pause and active-Turn-aware restart/exit behavior.
+- Upgraded Relay Protocol to v2 with QR pairing, signed Controller names, Pending requests, 60-second Device confirmation and Full/ViewOnly profiles.
+- Added Device Ready synchronization, Pairing aliases, permission updates, Device-side revoke and an EF Core v2 Migration that clears confirmed test Pairings.
+- Added QR Relay summaries and editable Controller names to the PWA while preserving the existing project/history workspace.
+- Added framework-dependent win-x64 Inno Setup delivery, .NET 8 Runtime detection, upgrade data preservation, optional uninstall retention and explicit `UNSIGNED` artifacts.
+
 ## 0.4.1 - 2026-08-23
 
 - Split first-time device enrollment throttling from idempotent registration by an already-known device identity.

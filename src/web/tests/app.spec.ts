@@ -14,10 +14,16 @@ async function installRelayMock(page: Page, options: {
   activeTurn?: boolean;
   disconnectThreadListOnce?: boolean;
   disconnectThreadReadOnce?: boolean;
+  desktopOwnedActiveTurn?: boolean;
   extraSingletonProjects?: number;
   historyEntryCount?: number;
+  richHistory?: boolean;
+  registeredControllerWithoutPairing?: boolean;
 } = {}) {
   const activeTurn = options.activeTurn ?? true;
+  let desktopTurnStartedAt = options.desktopOwnedActiveTurn
+    ? Math.floor((Date.now() - 27_000) / 1_000)
+    : undefined;
   const captured: CapturedMessage[] = [];
   let paired = false;
   let connectionCount = 0;
@@ -71,17 +77,51 @@ async function installRelayMock(page: Page, options: {
       projectId: undefined,
     });
   }
-  const historyEntries = Array.from({ length: options.historyEntryCount ?? 2 }, (_, index) => ({
-    itemId: `history-item-${index}`,
-    turnId: `history-turn-${Math.floor(index / 2)}`,
-    role: index % 2 === 0 ? 'user' : 'assistant',
-    text: index === 0
-      ? '请继续修复登录模块'
-      : index === 1
-        ? '登录模块的历史修复已经完成'
-        : `历史长消息 ${index} ${'内容'.repeat(180)}`,
-    phase: index % 2 === 0 ? undefined : 'final_answer',
-  }));
+  const historyEntries = options.richHistory
+    ? [{
+        itemId: 'history-rich-user',
+        turnId: 'history-turn-0',
+        role: 'user',
+        text: '# Files mentioned by the user:\n\n- sample.png\n\n## My request:\n\n请分析这张图片',
+        phase: undefined,
+        attachments: [{
+          kind: 'image',
+          name: 'sample.png',
+          mimeType: 'image/png',
+          dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        }],
+        changes: [],
+      }, {
+        itemId: 'history-rich-tool',
+        turnId: 'history-turn-0',
+        role: 'tool',
+        text: 'dotnet test',
+        phase: 'completed',
+        attachments: [],
+        changes: [{ path: 'src/App.tsx', kind: 'update', additions: 18, deletions: 4 }],
+      }, {
+        itemId: 'history-rich-assistant',
+        turnId: 'history-turn-0',
+        role: 'assistant',
+        text: '## 结论\n\n- **Markdown 已解析**\n- `图片已显示`',
+        phase: 'final_answer',
+        attachments: [],
+        changes: [],
+      }]
+    : Array.from({ length: options.historyEntryCount ?? 2 }, (_, index) => ({
+        itemId: `history-item-${index}`,
+        turnId: `history-turn-${Math.floor(index / 2)}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        text: index === 0
+          ? '请继续修复登录模块'
+          : index === 1
+            ? '登录模块的历史修复已经完成'
+            : `历史长消息 ${index} ${'内容'.repeat(180)}`,
+        phase: index % 2 === 0 ? undefined : 'final_answer',
+        attachments: [],
+        changes: [],
+      }));
+  let reconciledHistoryText: string | undefined;
   let route: WebSocketRoute | undefined;
   await page.routeWebSocket('**/ws/controller', (socket) => {
     connectionCount += 1;
@@ -91,11 +131,12 @@ async function installRelayMock(page: Page, options: {
       captured.push(envelope);
       switch (envelope.type) {
         case 'auth.hello':
-          if (paired) {
+          if (paired || options.registeredControllerWithoutPairing) {
             socket.send(JSON.stringify(reply('auth.ok', envelope.requestId, {
               role: 'controller',
               principalId: envelope.controllerId,
               connectionId: `conn-${connectionCount}`,
+              serverVersion: '0.6.0-test',
             }, undefined, envelope.controllerId)));
           } else {
             socket.send(JSON.stringify(reply('error', envelope.requestId, {
@@ -105,16 +146,23 @@ async function installRelayMock(page: Page, options: {
           }
           break;
         case 'pairing.claim':
+          socket.send(JSON.stringify(reply('pairing.pending', undefined, {
+            pairingRequestId: 'preq-browser-mock',
+            deviceId,
+            controllerId: envelope.controllerId,
+            expiresAt: Date.now() + 60_000,
+          }, deviceId, envelope.controllerId)));
           paired = true;
           socket.send(JSON.stringify(reply('pairing.completed', envelope.requestId, {
             deviceId,
             controllerId: envelope.controllerId,
             permissions: { view: true, steer: true, interrupt: true, approval: true },
+            serverVersion: '0.6.0-test',
           }, deviceId, envelope.controllerId)));
           break;
         case 'device.list':
           socket.send(JSON.stringify(reply('device.list.result', envelope.requestId, {
-            devices: [{
+            devices: paired ? [{
               deviceId,
               name: 'DEV-PC-01',
               online: true,
@@ -132,8 +180,9 @@ async function installRelayMock(page: Page, options: {
                 changedFiles: ['src/LoginService.cs'],
                 pendingApprovalCount: 0,
                 lastAgentMessage: '正在修复失败测试',
+                agentVersion: '0.6.0-test',
               },
-            }],
+            }] : [],
           }, undefined, envelope.controllerId)));
           break;
         case 'control.steer':
@@ -180,7 +229,28 @@ async function installRelayMock(page: Page, options: {
               threadId,
               name: threadId === 'thr-history-1' ? '历史测试会话' : '测试会话',
               cwd: threadId === 'thr-vision-1' ? 'D:\\Projects\\Vision' : 'D:\\Projects\\MES',
-              entries: historyEntries,
+              entries: reconciledHistoryText ? [...historyEntries, {
+                itemId: 'history-reconciled-live',
+                turnId: 'turn-1',
+                role: 'assistant',
+                text: reconciledHistoryText,
+                phase: 'commentary',
+                attachments: [],
+                changes: [],
+              }] : historyEntries,
+              turns: desktopTurnStartedAt !== undefined && threadId === 'thr-history-1'
+                ? [{
+                    turnId: 'desktop-turn-active',
+                    status: 'interrupted',
+                    startedAt: desktopTurnStartedAt,
+                  }]
+                : [{
+                    turnId: 'history-turn-0',
+                    status: 'completed',
+                    startedAt: 1_730_831_000,
+                    completedAt: 1_730_831_096,
+                    durationMs: 96_000,
+                  }],
               truncated: false,
             },
           }, envelope.deviceId, envelope.controllerId)));
@@ -198,7 +268,7 @@ async function installRelayMock(page: Page, options: {
             result: { threadId: envelope.payload.threadId, turnId: 'turn-resumed' },
           }, envelope.deviceId, envelope.controllerId)));
           break;
-        case 'pairing.revoked':
+        case 'pairing.revoke':
           socket.send(JSON.stringify(reply('pairing.revoked', envelope.requestId, envelope.payload, envelope.deviceId, envelope.controllerId)));
           break;
       }
@@ -232,42 +302,93 @@ async function installRelayMock(page: Page, options: {
         },
       }, deviceId)));
     },
-    sendAgentDelta(delta: string, itemId = 'item-live') {
+    sendAgentDelta(delta: string, itemId = 'item-live', threadId = 'thr-1') {
       if (!route) throw new Error('WebSocket mock is not connected');
       route.send(JSON.stringify(reply('codex.event', undefined, {
         eventId: `evt-delta-${crypto.randomUUID()}`,
         revision: 9,
         kind: 'AgentMessageDelta',
-        threadId: 'thr-1',
-        turnId: 'turn-1',
+        threadId,
+        turnId: threadId === 'thr-1' ? 'turn-1' : `turn-${threadId}`,
         itemId,
         occurredAt: Date.now(),
         data: { delta },
       }, deviceId)));
     },
-    sendAgentCompleted(text: string, itemId = 'item-live') {
+    sendCommand(command: string) {
+      if (!route) throw new Error('WebSocket mock is not connected');
+      route.send(JSON.stringify(reply('codex.event', undefined, {
+        eventId: `evt-command-${crypto.randomUUID()}`,
+        revision: 9,
+        kind: 'CommandCompleted',
+        threadId: 'thr-1',
+        turnId: 'turn-1',
+        itemId: 'item-command-live',
+        occurredAt: Date.now(),
+        data: { command, status: 'completed' },
+      }, deviceId)));
+    },
+    sendFileChanged() {
+      if (!route) throw new Error('WebSocket mock is not connected');
+      route.send(JSON.stringify(reply('codex.event', undefined, {
+        eventId: `evt-file-${crypto.randomUUID()}`,
+        revision: 9,
+        kind: 'FileChanged',
+        threadId: 'thr-1',
+        turnId: 'turn-1',
+        itemId: 'item-file-live',
+        occurredAt: Date.now(),
+        data: {
+          status: 'completed',
+          paths: ['src/App.tsx', 'src/relayClient.ts'],
+          changes: [
+            { path: 'src/App.tsx', kind: 'update', additions: 12, deletions: 3 },
+            { path: 'src/relayClient.ts', kind: 'update', additions: 7, deletions: 1 },
+          ],
+        },
+      }, deviceId)));
+    },
+    publishHistoryText(text: string) {
+      reconciledHistoryText = text;
+    },
+    startDesktopTurn() {
+      desktopTurnStartedAt = Math.floor(Date.now() / 1_000);
+    },
+    sendTurnStarted(threadId = 'thr-1') {
+      if (!route) throw new Error('WebSocket mock is not connected');
+      route.send(JSON.stringify(reply('codex.event', undefined, {
+        eventId: `evt-turn-started-${crypto.randomUUID()}`,
+        revision: 10,
+        kind: 'TurnStarted',
+        threadId,
+        turnId: threadId === 'thr-1' ? 'turn-1' : `turn-${threadId}`,
+        occurredAt: Date.now(),
+        data: { startedAt: Date.now() },
+      }, deviceId)));
+    },
+    sendAgentCompleted(text: string, itemId = 'item-live', threadId = 'thr-1') {
       if (!route) throw new Error('WebSocket mock is not connected');
       route.send(JSON.stringify(reply('codex.event', undefined, {
         eventId: `evt-completed-${crypto.randomUUID()}`,
         revision: 10,
         kind: 'AgentMessageCompleted',
-        threadId: 'thr-1',
-        turnId: 'turn-1',
+        threadId,
+        turnId: threadId === 'thr-1' ? 'turn-1' : `turn-${threadId}`,
         itemId,
         occurredAt: Date.now(),
         data: { text },
       }, deviceId)));
     },
-    sendTurnCompleted() {
+    sendTurnCompleted(threadId = 'thr-1') {
       if (!route) throw new Error('WebSocket mock is not connected');
       route.send(JSON.stringify(reply('codex.event', undefined, {
         eventId: `evt-turn-completed-${crypto.randomUUID()}`,
         revision: 11,
         kind: 'TurnCompleted',
-        threadId: 'thr-1',
-        turnId: 'turn-1',
+        threadId,
+        turnId: threadId === 'thr-1' ? 'turn-1' : `turn-${threadId}`,
         occurredAt: Date.now(),
-        data: { status: 'completed' },
+        data: { status: 'completed', durationMs: 96_000 },
       }, deviceId)));
     },
   };
@@ -281,7 +402,7 @@ function reply(
   controllerId?: string,
 ) {
   return {
-    version: 1,
+    version: 2,
     type,
     messageId: crypto.randomUUID(),
     requestId,
@@ -310,11 +431,43 @@ test('pairs with a signed proof and renders the recovered device snapshot', asyn
   expect(String(claim?.payload.controllerId)).toMatch(/^ctl_[a-f0-9]{32}$/u);
   expect(String(claim?.payload.publicKey).length).toBeGreaterThan(80);
   expect(String(claim?.payload.proofSignature).length).toBeGreaterThan(80);
+  await expect(page.getByText('Web v0.6.0 · Relay v0.6.0-test · Protocol v2', { exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
   await expect(page.getByRole('main').getByText('D:\\Projects\\MES', { exact: true })).toBeVisible();
   await expect(page.getByText('dotnet test')).toBeVisible();
   await expect(page.getByText('正在修复失败测试')).toBeVisible();
+  await expect(page.getByText('Agent v0.6.0-test', { exact: true })).toBeVisible();
+});
+
+test('re-pairs an authenticated Controller whose old Pairing was removed', async ({ page }) => {
+  const relay = await installRelayMock(page, { registeredControllerWithoutPairing: true });
+  await page.goto('/');
+  await page.getByLabel('六位配对码').fill('123456');
+  await page.getByRole('button', { name: '配对', exact: true }).click();
+  await expect(page.getByRole('button', { name: '打开 DEV-PC-01' })).toBeVisible({ timeout: 20_000 });
+  expect(relay.getConnectionCount()).toBeGreaterThanOrEqual(2);
+});
+
+test('confirms QR Relay summary before applying the one-time code', async ({ page }) => {
+  await installRelayMock(page);
+  await page.goto('/#/pair?relay=aHR0cDovLzEyNy4wLjAuMTo0MTcz&code=123456&device=DEV-QR');
+  await expect(page.getByText('127.0.0.1:4173', { exact: true })).toBeVisible();
+  await expect(page.getByText('DEV-QR', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '确认 Relay 并继续' }).click();
+  await expect(page.getByLabel('六位配对码')).toHaveValue('123 456');
+  await expect(page).not.toHaveURL(/code=123456/u);
+  await expect(page.getByLabel('控制端名称')).not.toHaveValue('');
+});
+
+test('restores the last selected computer after reload', async ({ page }) => {
+  await installRelayMock(page);
+  await page.goto('/');
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+  await expect(page.getByRole('button', { name: '停止当前任务' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: '停止当前任务' })).toBeVisible({ timeout: 20_000 });
 });
 
 test('sends steer, interrupt and the exact available approval decision', async ({ page }) => {
@@ -350,6 +503,8 @@ test('streams the active Codex reply with a typewriter and finalizes it', async 
 
   const initialReadCount = relay.captured.filter((message) => message.type === 'control.thread.read').length;
   const initialListCount = relay.captured.filter((message) => message.type === 'control.thread.list').length;
+  relay.sendCommand('dotnet test');
+  relay.sendFileChanged();
   relay.sendAgentDelta('第一段');
   relay.sendAgentDelta('第二段');
 
@@ -360,10 +515,61 @@ test('streams the active Codex reply with a typewriter and finalizes it', async 
   await expect(page.locator('.typing-caret')).toHaveCount(0);
 
   relay.sendTurnCompleted();
+  const liveSummary = page.locator('.process-summary').filter({ hasText: 'dotnet test' });
+  await expect(liveSummary).not.toHaveAttribute('open', '');
+  await expect(liveSummary.getByText('耗时 1分36秒', { exact: true })).toBeVisible();
+  await expect(liveSummary.getByText('影响 2 个文件 · +19 -4', { exact: true })).toBeVisible();
   await expect.poll(() => relay.captured.filter((message) => message.type === 'control.thread.read').length)
     .toBeGreaterThan(initialReadCount);
   await expect.poll(() => relay.captured.filter((message) => message.type === 'control.thread.list').length)
     .toBeGreaterThan(initialListCount);
+});
+
+test('uses pushed events without polling the full active history', async ({ page }) => {
+  const relay = await installRelayMock(page);
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+  await expect.poll(() => relay.captured.filter((message) => message.type === 'control.thread.read').length)
+    .toBeGreaterThan(0);
+  const initialReadCount = relay.captured.filter((message) => message.type === 'control.thread.read').length;
+  await page.waitForTimeout(2_400);
+  expect(relay.captured.filter((message) => message.type === 'control.thread.read')).toHaveLength(initialReadCount);
+  relay.sendAgentDelta('事件推送的过程更新');
+  await expect(page.getByText('事件推送的过程更新', { exact: true })).toBeVisible();
+});
+
+test('marks Desktop-owned history as external and never polls it', async ({ page }) => {
+  const relay = await installRelayMock(page, { activeTurn: false, desktopOwnedActiveTurn: true });
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  await page.getByRole('button', { name: /^历史测试会话/u }).click();
+
+  await expect(page.locator('.chat-header .status-pill')).toHaveText('Desktop 外部会话');
+  await expect(page.getByRole('textbox', { name: '恢复 Desktop 外部会话' })).toBeEnabled();
+  const initialReadCount = relay.captured.filter((message) => message.type === 'control.thread.read').length;
+  relay.publishHistoryText('Desktop 当前过程输出已同步');
+  await page.waitForTimeout(2_400);
+  expect(relay.captured.filter((message) => message.type === 'control.thread.read')).toHaveLength(initialReadCount);
+  await expect(page.getByText('Desktop 当前过程输出已同步', { exact: true })).toHaveCount(0);
+});
+
+test('shows running unread and completed-unread indicators for managed events', async ({ page }) => {
+  const relay = await installRelayMock(page, { activeTurn: false });
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  await page.getByRole('button', { name: /^MES 第二个会话/u }).click();
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  const historyButton = page.getByRole('button', { name: /^历史测试会话/u });
+  relay.sendTurnStarted('thr-history-1');
+  await expect(historyButton.locator('.thread-indicator.running')).toBeVisible();
+  relay.sendAgentCompleted('托管任务已完成', 'managed-completed', 'thr-history-1');
+  relay.sendTurnCompleted('thr-history-1');
+  await expect(historyButton.locator('.thread-indicator.completed-unread')).toBeVisible();
+  await historyButton.click();
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  await expect(page.getByRole('button', { name: /^历史测试会话/u }).locator('.thread-indicator')).toHaveCount(0);
 });
 
 test('lists real history and starts or resumes Codex sessions', async ({ page }) => {
@@ -377,7 +583,7 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
   const mesProject = page.getByRole('button', { name: '项目 MES' });
   await expect(mesProject).toHaveAttribute('aria-expanded', 'true');
   const mesRegionId = await mesProject.getAttribute('aria-controls');
-  const mesThreadNames = await page.locator(`#${mesRegionId} .conversation-link span`).allTextContents();
+  const mesThreadNames = await page.locator(`#${mesRegionId} .conversation-link-title`).allTextContents();
   expect(mesThreadNames).toEqual(['MES 第二个会话', '历史测试会话']);
   await expect(page.getByRole('button', { name: /^Vision 相机会话/u })).toBeVisible();
   await expect(page.getByText('最近', { exact: true })).toBeVisible();
@@ -412,11 +618,33 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
 
   await page.getByRole('button', { name: '打开会话栏' }).click();
   await historyButton.click();
-  await page.getByLabel('继续历史会话的任务').fill('继续历史任务');
-  await page.getByRole('button', { name: '恢复会话并发送' }).click();
+  await page.getByLabel('恢复 Desktop 外部会话').fill('继续历史任务');
+  await page.getByRole('button', { name: '恢复并由 Agent 托管' }).click();
   await expect.poll(() => relay.captured.some((message) =>
     message.type === 'control.thread.resume' && message.payload.threadId === 'thr-history-1',
   )).toBe(true);
+});
+
+test('renders markdown images elapsed time and a folded process summary', async ({ page }) => {
+  await installRelayMock(page, { activeTurn: false, richHistory: true });
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  await page.getByRole('button', { name: /^历史测试会话/u }).click();
+
+  await expect(page.getByRole('heading', { name: '结论' })).toBeVisible();
+  await expect(page.getByText('Markdown 已解析', { exact: true })).toBeVisible();
+  await expect(page.getByText('请分析这张图片', { exact: true })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'sample.png' })).toBeVisible();
+
+  const context = page.locator('.prompt-context');
+  await expect(context).not.toHaveAttribute('open', '');
+  const summary = page.locator('.process-summary');
+  await expect(summary).not.toHaveAttribute('open', '');
+  await expect(summary.getByText('耗时 1分36秒', { exact: true })).toBeVisible();
+  await expect(summary.getByText('影响 1 个文件 · +18 -4', { exact: true })).toBeVisible();
+  await summary.locator('summary').click();
+  await expect(summary.getByText('dotnet test', { exact: true })).toBeVisible();
 });
 
 test('recovers history after controller disconnects during list and read', async ({ page }) => {
@@ -443,7 +671,7 @@ test('recovers history after controller disconnects during list and read', async
 });
 
 test('keeps sidebar scroll and composer visible with long history', async ({ page }) => {
-  await installRelayMock(page, {
+  const relay = await installRelayMock(page, {
     activeTurn: false,
     extraSingletonProjects: 30,
     historyEntryCount: 160,
@@ -463,7 +691,7 @@ test('keeps sidebar scroll and composer visible with long history', async ({ pag
 
   await page.getByRole('button', { name: /^历史测试会话/u }).click();
   await expect(page.getByText(/历史长消息 159/u)).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByLabel('继续历史会话的任务')).toBeVisible();
+  await expect(page.getByLabel('恢复 Desktop 外部会话')).toBeVisible();
 
   const layout = await page.evaluate(() => {
     const root = document.documentElement;
@@ -481,6 +709,29 @@ test('keeps sidebar scroll and composer visible with long history', async ({ pag
   expect(layout.verticalPageOverflow).toBeLessThanOrEqual(0);
   expect(layout.feedScrollable).toBe(true);
   expect(layout.composerBottom).toBeLessThanOrEqual(layout.viewportHeight + 1);
+
+  const feed = page.locator('.chat-feed');
+  await page.waitForTimeout(250);
+  await feed.evaluate((element) => {
+    element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }));
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll', { bubbles: true }));
+    element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch' }));
+  });
+  await page.waitForTimeout(200);
+  await expect.poll(async () => feed.evaluate((element) => element.scrollTop)).toBeLessThan(80);
+  const scrollTopBeforeMessage = await feed.evaluate((element) => element.scrollTop);
+  relay.sendAgentDelta('向上滚动后的新消息', 'scroll-message', 'thr-history-1');
+  await page.waitForTimeout(100);
+  const scrollTopAfterMessage = await feed.evaluate((element) => element.scrollTop);
+  expect(Math.abs(scrollTopAfterMessage - scrollTopBeforeMessage)).toBeLessThan(20);
+  await expect(page.getByText('向上滚动后的新消息', { exact: true })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: /1 条新消息/u })).toBeVisible();
+  await page.getByRole('button', { name: /1 条新消息/u }).click();
+  await expect(page.getByText('向上滚动后的新消息', { exact: true })).toBeVisible();
+  await expect.poll(async () => feed.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight,
+  )).toBeLessThan(96);
 });
 
 test('pairing success toast clears automatically', async ({ page }) => {

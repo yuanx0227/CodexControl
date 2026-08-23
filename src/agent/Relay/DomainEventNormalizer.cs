@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodexControl.Agent.Codex;
+using CodexControl.Agent.Control;
 using CodexControl.Agent.State;
 using CodexControl.Protocol;
 
@@ -34,6 +35,10 @@ internal static class DomainEventNormalizer
 
         var data = kind switch
         {
+            "TurnStarted" => JsonSerializer.SerializeToElement(new
+            {
+                startedAt = FindInt64(message, "params", "turn", "startedAt"),
+            }, RelayJson.Options),
             "AgentMessageDelta" => JsonSerializer.SerializeToElement(new
             {
                 delta = Truncate(FindString(message, "params", "delta"), 4000),
@@ -51,7 +56,11 @@ internal static class DomainEventNormalizer
             "TurnCompleted" => JsonSerializer.SerializeToElement(new
             {
                 status = FindString(message, "params", "turn", "status"),
+                startedAt = FindInt64(message, "params", "turn", "startedAt"),
+                completedAt = FindInt64(message, "params", "turn", "completedAt"),
+                durationMs = FindInt64(message, "params", "turn", "durationMs"),
             }, RelayJson.Options),
+            "FileChanged" => MapFileChangedData(message),
             _ => JsonSerializer.SerializeToElement(new { }, RelayJson.Options),
         };
 
@@ -82,6 +91,58 @@ internal static class DomainEventNormalizer
         }
 
         return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+    }
+
+    private static long? FindInt64(JsonElement root, params string[] path)
+    {
+        var value = root;
+        foreach (var segment in path)
+        {
+            if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(segment, out value))
+            {
+                return null;
+            }
+        }
+
+        return value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number)
+            ? number
+            : null;
+    }
+
+    private static IReadOnlyList<CodexThreadHistoryFileChangePayload> FindChangedFiles(JsonElement message)
+    {
+        if (!TryFind(message, out var item, "params", "item"))
+        {
+            return [];
+        }
+
+        return CodexFileChangeMapper.Map(item);
+    }
+
+    private static JsonElement MapFileChangedData(JsonElement message)
+    {
+        var changes = FindChangedFiles(message);
+        return JsonSerializer.SerializeToElement(new
+        {
+            changes,
+            paths = changes.Select(change => change.Path).ToArray(),
+            status = FindString(message, "params", "item", "status"),
+        }, RelayJson.Options);
+    }
+
+    private static bool TryFind(JsonElement root, out JsonElement value, params string[] path)
+    {
+        value = root;
+        foreach (var segment in path)
+        {
+            if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(segment, out value))
+            {
+                value = default;
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static string? Truncate(string? value, int maxLength) =>

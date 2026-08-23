@@ -1,11 +1,14 @@
 using System.Net;
 using System.Net.WebSockets;
+using System.Drawing;
 using System.Text;
 using System.Text.Json;
 using CodexControl.Agent.Codex;
 using CodexControl.Agent.Configuration;
 using CodexControl.Agent.Control;
 using CodexControl.Agent.Diagnostics;
+using CodexControl.Agent.Desktop;
+using CodexControl.Agent.Lifecycle;
 using CodexControl.Agent.Proxy;
 using CodexControl.Agent.Relay;
 using CodexControl.Agent.Security;
@@ -31,10 +34,13 @@ internal static class TestRunner
         {
             ("JsonRpcProtocol", TestJsonRpcProtocolAsync),
             ("AgentOptions_SecureRelay", TestAgentOptionsAsync),
+            ("AgentSettings_AtomicRecovery", TestAgentSettingsAsync),
+            ("ThreadHistory_Markdown_Image_Timing_Summary", TestRichThreadHistoryAsync),
             ("CodexStateManager", TestCodexStateManagerAsync),
             ("CodexDesktopRuntimeResolver", TestCodexDesktopRuntimeResolverAsync),
             ("CodexExecutableProbe", TestCodexExecutableProbeAsync),
             ("AppServerBridge_LocalWsProxy", TestBridgeAndProxyAsync),
+            ("AgentRuntimeCoordinator_Lifecycle", TestRuntimeCoordinatorAsync),
             ("RemoteControl_ApprovalArbitration", TestRemoteControlAndApprovalAsync),
             ("AgentRelay_DPAPI_Authentication_Pairing", TestAgentRelayAsync),
             ("RealCodex_AppServerBridge", TestRealCodexAsync),
@@ -110,6 +116,262 @@ internal static class TestRunner
         Assert(development.RelayUrl?.Scheme == "ws" && development.CreatePairing,
             "explicit localhost development Relay should parse");
         return Task.CompletedTask;
+    }
+
+    private static Task TestAgentSettingsAsync()
+    {
+        var tempRoot = Path.GetFullPath(Path.GetTempPath());
+        var testDirectory = Path.GetFullPath(Path.Combine(
+            tempRoot,
+            $"codex-control-settings-{Guid.NewGuid():N}"));
+        Assert(testDirectory.StartsWith(
+            tempRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase), "settings test directory must stay under temp");
+        try
+        {
+            var paths = AgentDataPaths.FromDataDirectory(Path.Combine(testDirectory, "data"), testDirectory);
+            var store = new AgentSettingsStore(paths);
+            var defaults = store.Load();
+            Assert(defaults.Source == SettingsLoadSource.Defaults, "missing settings should load defaults");
+
+            var first = store.Save(AgentSettings.Default with
+            {
+                DeviceName = "Settings Test PC",
+                RelayRootUrl = "https://control.example.com",
+            });
+            Assert(first.RelayRootUrl == "https://control.example.com", "Relay root should normalize");
+            Assert(File.Exists(paths.SettingsPath), "primary settings should be persisted");
+            Assert(File.Exists(paths.LastGoodSettingsPath), "last-good settings should be persisted");
+
+            _ = store.Save(first with { DeviceName = "Second Name" });
+            File.WriteAllText(paths.SettingsPath, "{invalid-json");
+            var recovered = store.Load();
+            Assert(recovered.Source == SettingsLoadSource.LastGood, "invalid primary should recover last-good");
+            Assert(recovered.Settings.DeviceName == "Settings Test PC", "recovery should use previous valid settings");
+            Assert(recovered.QuarantinedPath is not null && File.Exists(recovered.QuarantinedPath),
+                "invalid settings should be quarantined");
+
+            var options = AgentOptions.FromSettings(recovered.Settings, paths);
+            Assert(options.Port == 0, "automatic local port should bind using port zero");
+            Assert(options.DataDirectory == paths.DataDirectory, "settings should use install data directory");
+            Assert(options.LogDirectory == paths.LogDirectory, "logs should stay below data directory");
+            var stateStore = new AgentStateStore(paths);
+            var queued = stateStore.AddRevocation(42);
+            Assert(queued.PendingPairingRevocations.Count == 1 &&
+                   queued.PendingPairingRevocations[0].PairingId == 42,
+                "offline Pairing revocation should be persisted");
+            Assert(new AgentStateStore(paths).Load().PendingPairingRevocations.Count == 1,
+                "pending revocation should survive process recreation");
+            Assert(stateStore.RemoveRevocation(42).PendingPairingRevocations.Count == 0,
+                "acknowledged revocation should be removed");
+            string deviceId;
+            string publicKey;
+            using (var identity = DeviceIdentity.LoadOrCreate(paths.DataDirectory, "Original Device"))
+            {
+                deviceId = identity.DeviceId;
+                publicKey = identity.PublicKey;
+            }
+            using (var renamed = DeviceIdentity.LoadOrCreate(paths.DataDirectory, "Renamed Device"))
+            {
+                Assert(renamed.DeviceId == deviceId && renamed.PublicKey == publicKey,
+                    "renaming a Device must not rotate its identity");
+                Assert(renamed.Name == "Renamed Device", "renamed Device metadata should be persisted");
+            }
+            AssertThrows<AgentConfigurationException>(
+                () => (AgentSettings.Default with { RelayRootUrl = "http://relay.example.com" }).Validate(),
+                "remote plaintext Relay root must be rejected");
+            Assert((AgentSettings.Default with { RelayRootUrl = "http://127.0.0.1:5080" })
+                .Validate().RelayRootUrl == "http://127.0.0.1:5080",
+                "loopback HTTP Relay root should be accepted for development");
+            using var qr = PairingQrRenderer.Render(
+                "https://control.example.com/#/pair?relay=ZXhhbXBsZQ&code=123456");
+            Assert(qr.Width > 100 && qr.Height == qr.Width,
+                "pairing QR should render locally as a square bitmap");
+            return Task.CompletedTask;
+        }
+        finally
+        {
+            if (Directory.Exists(testDirectory))
+            {
+                Directory.Delete(testDirectory, recursive: true);
+            }
+        }
+    }
+
+    private static async Task TestRuntimeCoordinatorAsync()
+    {
+        var tempRoot = Path.GetFullPath(Path.GetTempPath());
+        var testDirectory = Path.GetFullPath(Path.Combine(
+            tempRoot,
+            $"codex-control-runtime-{Guid.NewGuid():N}"));
+        Assert(testDirectory.StartsWith(
+            tempRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase), "runtime test directory must stay under temp");
+        try
+        {
+            var paths = AgentDataPaths.FromDataDirectory(Path.Combine(testDirectory, "data"), testDirectory);
+            paths.EnsureWritable();
+            var options = AgentOptions.ForTests(GetTestExecutablePath(), paths.LogDirectory, port: 0) with
+            {
+                DataDirectory = paths.DataDirectory,
+            };
+            await using var runtime = new AgentRuntimeCoordinator(options, paths, remoteAccessPaused: false);
+            runtime.Start();
+            await WaitUntilAsync(
+                () => runtime.Snapshot.CoreStatus == RuntimeCoreStatus.Ready,
+                TestTimeout).ConfigureAwait(false);
+            var first = runtime.Snapshot;
+            var proxyUri = first.LocalProxyUri ??
+                           throw new InvalidOperationException("runtime should expose the actual proxy URI");
+            Assert(proxyUri.IsLoopback, "runtime should expose a loopback proxy URI");
+            Assert(proxyUri.Port > 0, "automatic port should resolve to a real port");
+
+            await runtime.PauseRemoteAccessAsync(CancellationToken.None).ConfigureAwait(false);
+            Assert(runtime.Snapshot.RelayStatus == RuntimeRelayStatus.Paused,
+                "pause should be independent from the local Codex core");
+            Assert(runtime.Snapshot.CoreStatus == RuntimeCoreStatus.Ready,
+                "pause should not stop the local Codex core");
+
+            var revision = runtime.Snapshot.Revision;
+            Assert(runtime.RequestRestart(force: true), "forced restart should be scheduled immediately");
+            await WaitUntilAsync(
+                () => runtime.Snapshot.CoreStatus == RuntimeCoreStatus.Ready &&
+                      runtime.Snapshot.Revision > revision + 2,
+                TestTimeout).ConfigureAwait(false);
+
+            using var stopTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await runtime.StopAsync(stopTimeout.Token).ConfigureAwait(false);
+            Assert(runtime.Snapshot.CoreStatus == RuntimeCoreStatus.Stopped,
+                "runtime should publish a stopped terminal state");
+        }
+        finally
+        {
+            if (Directory.Exists(testDirectory))
+            {
+                Directory.Delete(testDirectory, recursive: true);
+            }
+        }
+    }
+
+    private static Task TestRichThreadHistoryAsync()
+    {
+        var tempRoot = Path.GetFullPath(Path.GetTempPath());
+        var testDirectory = Path.GetFullPath(Path.Combine(
+            tempRoot,
+            $"codex-control-rich-history-{Guid.NewGuid():N}"));
+        Assert(testDirectory.StartsWith(
+            tempRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase), "rich history directory must stay under temp");
+        Directory.CreateDirectory(testDirectory);
+        try
+        {
+            var imagePath = Path.Combine(testDirectory, "history-image.png");
+            using (var bitmap = new Bitmap(80, 50))
+            {
+                using var graphics = Graphics.FromImage(bitmap);
+                graphics.Clear(Color.DarkSlateBlue);
+                bitmap.Save(imagePath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+
+            using var items = JsonDocument.Parse(
+                $$"""
+                {
+                  "data":[
+                    {
+                      "turnId":"turn-rich",
+                      "item":{
+                        "id":"item-user-rich",
+                        "type":"userMessage",
+                        "content":[
+                          {"type":"text","text":"## 标题\n\n- 第一项\n- 第二项"},
+                          {"type":"localImage","path":{{JsonSerializer.Serialize(imagePath)}}}
+                        ]
+                      }
+                    },
+                    {
+                      "turnId":"turn-rich",
+                      "item":{
+                        "id":"item-command-rich",
+                        "type":"commandExecution",
+                        "command":"dotnet test",
+                        "status":"completed"
+                      }
+                    },
+                    {
+                      "turnId":"turn-rich",
+                      "item":{
+                        "id":"item-file-rich",
+                        "type":"fileChange",
+                        "status":"completed",
+                        "changes":[{
+                          "path":"src/App.cs",
+                          "kind":"update",
+                          "diff":"--- a/src/App.cs\n+++ b/src/App.cs\n@@ -10,2 +10,3 @@\n-old\n+new\n+added"
+                        }]
+                      }
+                    }
+                  ],
+                  "nextCursor":null
+                }
+                """);
+            var mapped = CodexThreadHistoryMapper.MapItemsPage(items.RootElement);
+            var user = mapped.Entries.Single(value => value.Role == "user");
+            var tool = mapped.Entries.Single(value => value.Text == "dotnet test");
+            var fileChange = mapped.Entries.Single(value => value.Changes.Count > 0);
+            Assert(user.Text.Contains("## 标题", StringComparison.Ordinal),
+                "markdown source should be preserved for the PWA renderer");
+            Assert(user.Attachments.Count == 1 &&
+                   user.Attachments[0].DataUrl.StartsWith("data:image/", StringComparison.Ordinal) &&
+                   user.Attachments[0].DataUrl.Length < CodexImageAttachmentMapper.MaxTotalDataUrlLength,
+                "local image should become a bounded inline attachment");
+            Assert(!JsonSerializer.Serialize(user, RelayJson.Options).Contains(imagePath, StringComparison.Ordinal),
+                "attachment DTO must not disclose the absolute local path");
+            Assert(tool.Text == "dotnet test" && tool.Phase == "completed",
+                "command history should be available to the folded process summary");
+            Assert(fileChange.Changes.Single().Additions == 2 &&
+                   fileChange.Changes.Single().Deletions == 1 &&
+                   fileChange.Text.Contains("+2 -1", StringComparison.Ordinal),
+                "file history should preserve per-file addition and deletion counts");
+
+            using var liveFileChange = JsonDocument.Parse("""
+                {"method":"item/completed","params":{"threadId":"thr-rich","turnId":"turn-rich","item":{
+                  "id":"item-file-live","type":"fileChange","status":"completed","changes":[{
+                    "path":"src/Live.cs","kind":"add","diff":"@@ -0,0 +1,2 @@\n+one\n+two"
+                  }]}}}
+                """);
+            var liveEvent = DomainEventNormalizer.Normalize(
+                liveFileChange.RootElement,
+                new CodexStateManager().Snapshot);
+            Assert(liveEvent?.Kind == "FileChanged" &&
+                   liveEvent.Data.GetProperty("changes")[0].GetProperty("additions").GetInt32() == 2,
+                "live file events should include line impact statistics");
+
+            using var turns = JsonDocument.Parse("""
+                {
+                  "data":[{
+                    "id":"turn-rich",
+                    "status":"completed",
+                    "startedAt":1730831000,
+                    "completedAt":1730831096,
+                    "durationMs":96000,
+                    "items":[]
+                  }],
+                  "nextCursor":null
+                }
+                """);
+            var timing = CodexThreadHistoryMapper.MapTurnsPage(turns.RootElement).Turns.Single();
+            Assert(timing.Status == "completed" &&
+                   timing.DurationMs == 96_000 && timing.StartedAt == 1_730_831_000,
+                "turn timing should preserve app-server status and duration metadata");
+            return Task.CompletedTask;
+        }
+        finally
+        {
+            if (Directory.Exists(testDirectory))
+            {
+                Directory.Delete(testDirectory, recursive: true);
+            }
+        }
     }
 
     private static Task TestCodexStateManagerAsync()
@@ -800,12 +1062,14 @@ internal static class TestRunner
             var threadReadPayload = threadReadResult.Deserialize<CodexThreadReadResultPayload>(RelayJson.Options) ??
                                     throw new InvalidOperationException("thread/read payload should deserialize");
             Assert(
-                threadReadPayload.Entries.Count == 2 &&
-                threadReadPayload.Entries[0].Role == "user" &&
-                threadReadPayload.Entries[0].Text == "修复登录模块" &&
-                threadReadPayload.Entries[1].Role == "assistant" &&
-                threadReadPayload.Entries[1].Text == "登录模块已修复",
-                "thread/read should normalize real user and assistant history");
+                threadReadPayload.Entries.Count == 3 &&
+                threadReadPayload.Entries.Single(entry => entry.Role == "user").Text == "修复登录模块" &&
+                threadReadPayload.Entries.Single(entry => entry.Role == "assistant").Text == "登录模块已修复" &&
+                threadReadPayload.Entries.Single(entry => entry.Changes.Count > 0).Changes.Single().Additions == 2 &&
+                threadReadPayload.Entries.Single(entry => entry.Changes.Count > 0).Changes.Single().Deletions == 1,
+                "thread/read should normalize user, assistant, and file impact history");
+            Assert(threadReadPayload.Turns.Single().DurationMs == 96_000,
+                "thread/read should include turn duration metadata");
 
             var legacyThreadRead = await dispatcher.ReadThreadAsync(
                 "thr-history-legacy",

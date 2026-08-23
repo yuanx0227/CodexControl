@@ -34,6 +34,8 @@ export interface RelayClientState {
   devices: DeviceSummary[];
   events: Record<string, CodexEvent[]>;
   approvals: Record<string, ApprovalRequested[]>;
+  pairingPending?: string;
+  relayVersion?: string;
 }
 
 type Listener = (state: RelayClientState) => void;
@@ -42,6 +44,15 @@ interface PendingRequest {
   resolve: (envelope: RelayEnvelope) => void;
   reject: (error: Error) => void;
   timer: number;
+}
+
+interface PairingClaim {
+  code: string;
+  controllerId: string;
+  controllerName: string;
+  publicKey: string;
+  proofNonce: string;
+  proofSignature: string;
 }
 
 export class RelayClient {
@@ -90,33 +101,46 @@ export class RelayClient {
     this.setState({ connection: 'offline', authenticated: false });
   }
 
-  async pair(codeInput: string): Promise<PairingCompleted> {
+  async pair(codeInput: string, controllerNameInput?: string): Promise<PairingCompleted> {
     const identity = this.requireIdentity();
-    await this.waitForOpen();
     const code = codeInput.replaceAll(/\D/gu, '');
     if (code.length !== 6) throw new Error('请输入六位配对码');
     const proofNonce = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
+    const controllerName = controllerNameInput?.trim() || defaultControllerName();
+    if (controllerName.length > 200) throw new Error('控制端名称不能超过 200 个字符');
     const proofSignature = await sign(
       identity,
-      pairingCanonical(code, identity.controllerId, identity.publicKeyEncoded, proofNonce),
+      pairingCanonical(code, identity.controllerId, controllerName, identity.publicKeyEncoded, proofNonce),
     );
-    const envelope = await this.request(
-      MessageType.pairingClaim,
-      {
+    const wasAuthenticated = this.state.authenticated;
+    const claim: PairingClaim = {
         code,
         controllerId: identity.controllerId,
-        controllerName: navigator.userAgent.includes('Mobile') ? 'Mobile Browser' : 'Browser',
+        controllerName,
         publicKey: identity.publicKeyEncoded,
         proofNonce,
         proofSignature,
-      },
-      { controllerId: identity.controllerId },
-    );
+    };
+    const envelope = wasAuthenticated
+      ? await this.claimPairing(claim, identity.controllerId)
+      : await this.request(
+          MessageType.pairingClaim,
+          claim,
+          { controllerId: identity.controllerId },
+          75_000,
+        );
     const completed = envelope.payload as PairingCompleted;
     this.identity = await addPairedDevice(identity, completed.deviceId);
     this.reconnectAttempt = 0;
-    this.setState({ authenticated: true, connection: 'connected', lastError: undefined });
-    this.startHeartbeat();
+    this.setState({
+      lastError: undefined,
+      pairingPending: undefined,
+      relayVersion: completed.serverVersion ?? this.state.relayVersion,
+    });
+    if (!wasAuthenticated) {
+      this.setState({ authenticated: true, connection: 'connected' });
+      this.startHeartbeat();
+    }
     await this.refreshDevices();
     return completed;
   }
@@ -219,7 +243,7 @@ export class RelayClient {
   async revoke(deviceId: string): Promise<void> {
     const identity = this.requireIdentity();
     await this.request(
-      MessageType.pairingRevoked,
+      MessageType.pairingRevoke,
       { deviceId, controllerId: identity.controllerId },
       { deviceId, controllerId: identity.controllerId },
     );
@@ -270,7 +294,7 @@ export class RelayClient {
     this.send(
       createEnvelope(
         MessageType.authHello,
-        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.4.1' },
+        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.6.0' },
         { requestId: this.authRequestId, controllerId: identity.controllerId },
       ),
     );
@@ -280,7 +304,7 @@ export class RelayClient {
     let envelope: RelayEnvelope;
     try {
       envelope = JSON.parse(json) as RelayEnvelope;
-      if (envelope.version !== 1 || !envelope.type) throw new Error('Invalid Relay envelope');
+      if (envelope.version !== 2 || !envelope.type) throw new Error('Invalid Relay envelope');
     } catch {
       this.setState({ lastError: 'Relay 返回了无效消息' });
       return;
@@ -295,7 +319,12 @@ export class RelayClient {
       const auth = envelope.payload as AuthOk;
       this.connectionId = auth.connectionId;
       this.reconnectAttempt = 0;
-      this.setState({ authenticated: true, connection: 'connected', lastError: undefined });
+      this.setState({
+        authenticated: true,
+        connection: 'connected',
+        lastError: undefined,
+        relayVersion: auth.serverVersion,
+      });
       this.startHeartbeat();
       await this.refreshDevices();
       return;
@@ -324,6 +353,10 @@ export class RelayClient {
         const pairing = envelope.payload as PairingCompleted;
         const identity = this.requireIdentity();
         this.identity = await addPairedDevice(identity, pairing.deviceId);
+        break;
+      }
+      case MessageType.pairingPending: {
+        this.setState({ pairingPending: '已提交申请，请在电脑端确认' });
         break;
       }
       case MessageType.deviceListResult:
@@ -425,18 +458,58 @@ export class RelayClient {
     });
   }
 
+  private claimPairing(payload: PairingClaim, controllerId: string): Promise<RelayEnvelope> {
+    const relayUrl = validateRelayUrl(loadRelayUrl());
+    const claimRequestId = requestId();
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(relayUrl);
+      let settled = false;
+      const finish = (error?: Error, envelope?: RelayEnvelope) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        socket.close(1000, 'pairing claim finished');
+        if (error) reject(error);
+        else resolve(envelope!);
+      };
+      const timer = window.setTimeout(
+        () => finish(new Error('配对确认超时，请重新生成配对码')),
+        75_000,
+      );
+      socket.onopen = () => socket.send(JSON.stringify(createEnvelope(
+        MessageType.pairingClaim,
+        payload,
+        { requestId: claimRequestId, controllerId },
+      )));
+      socket.onmessage = (event) => {
+        try {
+          const envelope = JSON.parse(String(event.data)) as RelayEnvelope;
+          if (envelope.version !== 2 || !envelope.type) throw new Error('Relay 返回了无效消息');
+          if (envelope.type === MessageType.pairingPending) {
+            this.setState({ pairingPending: '已提交申请，请在电脑端确认' });
+            return;
+          }
+          if (envelope.requestId !== claimRequestId) return;
+          if (envelope.type === MessageType.error || envelope.type === MessageType.pairingDenied) {
+            const error = envelope.payload as ErrorPayload;
+            finish(new Error(`${error.code}: ${error.message}`));
+            return;
+          }
+          if (envelope.type === MessageType.pairingCompleted) finish(undefined, envelope);
+        } catch (reason) {
+          finish(reason instanceof Error ? reason : new Error(String(reason)));
+        }
+      };
+      socket.onerror = () => finish(new Error('Relay 配对连接失败'));
+      socket.onclose = () => {
+        if (!settled) finish(new Error('Relay 配对连接已断开'));
+      };
+    });
+  }
+
   private send(envelope: RelayEnvelope): void {
     if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('Relay 尚未连接');
     this.socket.send(JSON.stringify(envelope));
-  }
-
-  private async waitForOpen(): Promise<void> {
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-      if (this.socket?.readyState === WebSocket.OPEN) return;
-      await new Promise((resolve) => window.setTimeout(resolve, 50));
-    }
-    throw new Error('Relay 连接超时');
   }
 
   private async waitForDeviceReady(deviceId: string, timeoutMs: number): Promise<void> {
@@ -566,6 +639,24 @@ export class RelayClient {
 
 function requestId(): string {
   return `req_${crypto.randomUUID().replaceAll('-', '')}`;
+}
+
+function defaultControllerName(): string {
+  const agent = navigator.userAgent;
+  const platform = /iPhone/iu.test(agent)
+    ? 'iPhone'
+    : /iPad/iu.test(agent)
+      ? 'iPad'
+      : /Android/iu.test(agent)
+        ? 'Android'
+        : /Edg\//iu.test(agent)
+          ? 'Edge'
+          : /Chrome\//iu.test(agent)
+            ? 'Chrome'
+            : /Safari\//iu.test(agent)
+              ? 'Safari'
+              : 'Browser';
+  return `${platform} · ${navigator.platform || 'Controller'}`.slice(0, 200);
 }
 
 function isTransientReadFailure(error: Error) {

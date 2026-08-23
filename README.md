@@ -27,6 +27,7 @@ MVP 代码与自动化闭环已经实现：
 - Challenge/Signature 长期认证与 replay 防护；
 - Relay WSS、SQLite/EF Core Migration、Presence、Snapshot Cache、权限与审计元数据；
 - React/Vite PWA：配对、设备列表、同身份多标签稳定连接、Desktop 风格项目/最近侧栏、实时打字机回复、项目内新建、固定 Composer、Steer、Interrupt、Approval、解除配对；
+- 聊天正文安全解析 GFM Markdown，显示受控本地图片缩略图、Turn 耗时和默认折叠过程摘要；
 - ChatGPT 风格的信息架构：桌面会话侧栏、中央消息流、底部上下文输入框和移动端抽屉；
 - Docker Compose、nginx HTTPS/WSS、SQLite volume；
 - Fake、真实 Relay、真实浏览器和真实 Codex 测试。
@@ -49,10 +50,11 @@ tools/                      握手探针与 Release 脚本
 ## 文档
 
 - [architecture.md](docs/architecture.md) — 组件、数据流和状态机
-- [protocol.md](docs/protocol.md) — Relay v1 wire contract
+- [protocol.md](docs/protocol.md) — Relay v2 wire contract
 - [security.md](docs/security.md) — 威胁模型与生产清单
 - [development.md](docs/development.md) — 构建、测试、Migration、Docker 和 Release
 - [feasibility.md](docs/feasibility.md) — 自动化/真实环境证据与现场边界
+- [agent-desktop-experience-design.md](docs/agent-desktop-experience-design.md) — 托盘、设置、配对 v2 与安装设计
 - [CHANGELOG.md](CHANGELOG.md) — 版本变更
 
 ## 快速运行
@@ -75,32 +77,28 @@ npm ci
 npm run dev
 ```
 
-在 PWA 的 Relay 设置中使用 `ws://127.0.0.1:5080/ws/controller`。非本机环境必须使用 `wss://`。
+二维码会带入 Relay 根地址；手工开发连接使用 `ws://127.0.0.1:5080/ws/controller`。
+非本机环境必须使用 `wss://`。
 
-### 3. Agent 与配对码
+### 3. Agent、设置与配对
 
 ```powershell
-& '.\out\release\agent-win-x64\CodexControlAgent.exe' `
-  --relay-url 'ws://127.0.0.1:5080' `
-  --allow-insecure-relay `
-  --device-name 'DEV-PC-01' `
-  --pair
+& '.\out\release\agent-win-x64\CodexControlAgent.exe'
 ```
 
-默认会优先使用 PATH 中的独立 Codex CLI。若独立 PowerShell 的 PATH 不包含 Codex，Agent 会从当前用户的 AppX Package Repository 查找最高版本 `OpenAI.Codex`，严格校验 WindowsApps 包路径，再把同版本的 `codex.exe`、Code Mode Host、Command Runner 和 Sandbox Setup 原子暂存到 `%LOCALAPPDATA%\CodexControl\codex-runtimes\desktop` 后使用；不会附加 Desktop 已打开的会话。显式 `--codex-path` 仍可覆盖自动发现。
+首次启动在设置窗口填写 Relay 根地址 `http://127.0.0.1:5080` 和电脑名称。正常启动静默常驻托盘，
+设置、DPAPI 身份、日志和 Runtime 缓存统一放在 EXE 同目录 `data\`。默认自动选择 loopback 端口，
+“打开 Codex 终端”会使用实际端口执行 `codex --remote`。
 
-Agent 输出：
+默认会优先使用 PATH 中的独立 Codex CLI。若独立 PowerShell 的 PATH 不包含 Codex，Agent 会从当前用户的 AppX Package Repository 查找最高版本 `OpenAI.Codex`，严格校验 WindowsApps 包路径，再把同版本的固定 Runtime 原子暂存到 `data\codex-runtimes\desktop` 后使用；不会附加 Desktop 已打开的会话。
 
-```text
-DEVICE dev_... DEV-PC-01
-PAIRING_CODE 583271 EXPIRES_AT ...
-READY ws://127.0.0.1:8765/
-CONNECT & 'C:\Users\...\CodexControl\codex-runtimes\desktop\...\codex.exe' --remote 'ws://127.0.0.1:8765/'
-```
+点击“生成配对码”后显示本地二维码和六位码。手机先确认 Relay/电脑摘要，随后电脑必须在 60 秒内
+选择“完整控制”“仅查看”或拒绝；Claim 本身不会授予权限。
 
-生产环境删除 `--allow-insecure-relay` 并使用可信 `wss://`。
+Headless 兼容入口为 `CodexControlAgent.exe --headless [options]`。生产使用可信 HTTPS/WSS；
+明文 HTTP/WS 只允许 localhost/loopback 开发。
 
-配对后无需先打开本地 TUI：手机设备详情会直接读取电脑的 Codex 历史。项目优先使用公开 `project/list/projectId`，当前 Desktop 未持久化项目时以真实工作目录兼容分组；Codex 自动生成的日期会话目录放到“最近”，不显示“＋”。任务按 `recencyAt` 排序。当前打开会话会实时合并 AgentMessage Delta 并显示打字机光标，完成后后台刷新最终历史。若已有 Turn 正在运行，只能 Steer 或停止。
+配对后无需先打开本地 TUI：手机设备详情会直接读取电脑的 Codex 历史。项目优先使用公开 `project/list/projectId`，当前 Desktop 未持久化项目时以真实工作目录兼容分组；Codex 自动生成的日期会话目录放到“最近”，不显示“＋”。任务按 `recencyAt` 排序。由 Agent 创建或恢复的会话通过 Domain Events 实时合并 AgentMessage Delta，显示运行、未读和完成未读状态；完成时只做一次有界历史核对。Desktop 原生会话明确显示为外部只读会话，不轮询或伪造实时状态。
 
 ## Docker 部署
 

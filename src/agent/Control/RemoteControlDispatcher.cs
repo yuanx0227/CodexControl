@@ -16,6 +16,8 @@ public sealed class RemoteControlDispatcher
 {
     private const int ThreadItemsPageSize = 100;
     private const int MaxThreadItemPages = 20;
+    private const int ThreadTurnsPageSize = 100;
+    private const int MaxThreadTurnPages = 5;
     private const int ProjectPageSize = 100;
     private const int MaxProjectPages = 5;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
@@ -206,9 +208,11 @@ public sealed class RemoteControlDispatcher
                 }
             }
 
+            var turns = await ReadTurnTimingsAsync(threadId, cancellationToken).ConfigureAwait(false);
             var history = CodexThreadHistoryMapper.Build(
                 metadata,
                 entriesNewestFirst,
+                turns,
                 hasMore: cursor is not null,
                 textWasTruncated);
             return Success(JsonSerializer.SerializeToElement(
@@ -562,6 +566,48 @@ public sealed class RemoteControlDispatcher
 
     private static bool IsThreadItemsListUnavailable(AppServerRpcException exception) =>
         IsMethodUnavailable(exception, "thread/items/list");
+
+    private async Task<IReadOnlyList<CodexTurnTimingPayload>> ReadTurnTimingsAsync(
+        string threadId,
+        CancellationToken cancellationToken)
+    {
+        var turns = new List<CodexTurnTimingPayload>();
+        string? cursor = null;
+        for (var pageNumber = 0; pageNumber < MaxThreadTurnPages; pageNumber++)
+        {
+            JsonElement result;
+            try
+            {
+                result = await _bridge.SendRequestAsync(
+                    "thread/turns/list",
+                    new
+                    {
+                        threadId,
+                        cursor,
+                        limit = ThreadTurnsPageSize,
+                        sortDirection = "desc",
+                        itemsView = "summary",
+                    },
+                    HistoryTimeout,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (AppServerRpcException exception) when (
+                pageNumber == 0 && IsMethodUnavailable(exception, "thread/turns/list"))
+            {
+                return [];
+            }
+
+            var page = CodexThreadHistoryMapper.MapTurnsPage(result);
+            turns.AddRange(page.Turns);
+            cursor = page.NextCursor;
+            if (cursor is null)
+            {
+                break;
+            }
+        }
+
+        return turns;
+    }
 
     private static bool IsMethodUnavailable(AppServerRpcException exception, string method) =>
         exception.Method == method &&

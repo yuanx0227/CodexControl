@@ -46,12 +46,12 @@ test('real Relay validates browser crypto pairing and routes all controls', asyn
   await page.getByRole('button', { name: /系统历史会话/u }).click();
   await expect(page.getByText('系统历史用户消息', { exact: true })).toBeVisible();
   await expect(page.getByText('系统历史助手回复', { exact: true })).toBeVisible();
-  await page.getByLabel('继续历史会话的任务').fill('真实 Relay 恢复历史会话');
-  await page.getByRole('button', { name: '恢复会话并发送' }).click();
+  await page.getByLabel('恢复 Desktop 外部会话').fill('真实 Relay 恢复历史会话');
+  await page.getByRole('button', { name: '恢复并由 Agent 托管' }).click();
   await expect(page.getByText('历史会话已恢复，真实 Turn 已启动')).toBeVisible();
   await expect(page.getByText('远程会话运行中')).toBeVisible();
 
   await page.reload();
-  await expect(page.getByRole('heading', { name: '开发电脑' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '停止当前任务' })).toBeVisible({ timeout: 20_000 });
   await expect(page.getByText('SYSTEM-DEV-PC')).toBeVisible();
 });

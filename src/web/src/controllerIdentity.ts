@@ -85,10 +85,11 @@ export function authCanonical(
 export function pairingCanonical(
   code: string,
   controllerId: string,
+  controllerName: string,
   publicKey: string,
   proofNonce: string,
 ): string {
-  return ['codex-control-pairing-proof-v1', code, controllerId, publicKey, proofNonce].join('\n');
+  return ['codex-control-pairing-proof-v2', code, controllerId, controllerName, publicKey, proofNonce].join('\n');
 }
 
 export function base64UrlEncode(value: Uint8Array): string {

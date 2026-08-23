@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [string]$InnoCompiler,
+    [string]$SignToolCommand
 )
 
 Set-StrictMode -Version Latest
@@ -39,6 +41,7 @@ $agentTests = Join-Path $workspace 'tests\CodexControl.Agent.Tests\CodexControl.
 $relayTests = Join-Path $workspace 'tests\CodexControl.Relay.Tests\CodexControl.Relay.Tests.csproj'
 $webRoot = Join-Path $workspace 'src\web'
 $protocolSync = Join-Path $workspace 'tools\Sync-ProtocolMessageTypes.ps1'
+$installerScript = Join-Path $workspace 'installer\CodexControl.iss'
 
 & $protocolSync -Check
 
@@ -81,6 +84,7 @@ $relayOutput = Join-Path $outputRoot 'relay'
     --output $agentOutput `
     --nologo
 if ($LASTEXITCODE -ne 0) { throw 'Agent publish failed.' }
+New-Item -ItemType Directory -Force -Path (Join-Path $agentOutput 'data') | Out-Null
 & dotnet publish $relayProject `
     --configuration Release `
     --self-contained false `
@@ -92,6 +96,44 @@ Copy-Item -Recurse -LiteralPath (Join-Path $webRoot 'dist') -Destination (Join-P
 $deployOutput = Join-Path $outputRoot 'deploy'
 Copy-Item -Recurse -LiteralPath (Join-Path $workspace 'deploy') -Destination $deployOutput
 Get-ChildItem -Recurse -File -LiteralPath $deployOutput -Filter '*.pem' | Remove-Item -Force
+
+$installerOutput = Join-Path $outputRoot 'installer'
+New-Item -ItemType Directory -Force -Path $installerOutput | Out-Null
+if ([string]::IsNullOrWhiteSpace($InnoCompiler)) {
+    $innoCandidates = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
+        'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+        'C:\Program Files\Inno Setup 6\ISCC.exe'
+    )
+    $InnoCompiler = $innoCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+}
+if ([string]::IsNullOrWhiteSpace($InnoCompiler) -or
+    -not (Test-Path -LiteralPath $InnoCompiler -PathType Leaf)) {
+    throw 'Inno Setup 6 compiler was not found. Install JRSoftware.InnoSetup or pass -InnoCompiler.'
+}
+
+$installerBaseName = 'CodexControl-Setup-UNSIGNED'
+$innoArguments = @(
+    "/DSourceRoot=$agentOutput",
+    "/DOutputRoot=$installerOutput",
+    '/DAppVersion=0.6.0',
+    "/DOutputBaseName=$installerBaseName"
+)
+if (-not [string]::IsNullOrWhiteSpace($SignToolCommand)) {
+    $installerBaseName = 'CodexControl-Setup'
+    $innoArguments[3] = "/DOutputBaseName=$installerBaseName"
+    $innoArguments += '/DSIGN_INSTALLER=1'
+    $innoArguments += "/Scodexsign=$SignToolCommand"
+}
+else {
+    [System.IO.File]::WriteAllText(
+        (Join-Path $agentOutput 'UNSIGNED.txt'),
+        "UNSIGNED INTERNAL/TEST BUILD`r`nSmartScreen and enterprise policy acceptance are not proven.`r`n")
+}
+$innoArguments += $installerScript
+& $InnoCompiler @innoArguments
+if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
 
 $hashLines = Get-ChildItem -Recurse -File -LiteralPath $outputRoot |
     Where-Object { $_.Name -ne 'SHA256SUMS' } |

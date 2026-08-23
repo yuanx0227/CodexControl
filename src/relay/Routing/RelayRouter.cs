@@ -11,36 +11,51 @@ public sealed class RelayRouter
 {
     private readonly ConnectionRegistry _connections;
     private readonly PairingService _pairing;
+    private readonly PendingPairingConnections _pendingPairings;
     private readonly IDbContextFactory<RelayDbContext> _dbFactory;
     private readonly ControlRequestTracker _controlRequests;
 
     public RelayRouter(
         ConnectionRegistry connections,
         PairingService pairing,
+        PendingPairingConnections pendingPairings,
         IDbContextFactory<RelayDbContext> dbFactory,
         ControlRequestTracker controlRequests)
     {
         _connections = connections;
         _pairing = pairing;
+        _pendingPairings = pendingPairings;
         _dbFactory = dbFactory;
         _controlRequests = controlRequests;
     }
 
     public async Task OnAuthenticatedAsync(RelayPeer peer, CancellationToken cancellationToken)
     {
-        _connections.Register(peer);
-        if (peer.Role == PrincipalRole.Device)
+        if (peer.Role == PrincipalRole.Controller)
         {
-            await BroadcastPresenceAsync(peer.PrincipalId!, online: true, cancellationToken).ConfigureAwait(false);
+            _connections.Register(peer);
         }
+
+        await Task.CompletedTask.ConfigureAwait(false);
     }
 
     public async Task OnDisconnectedAsync(RelayPeer peer, CancellationToken cancellationToken)
     {
         var removed = _connections.Remove(peer);
-        if (removed && peer.Role == PrincipalRole.Device && peer.PrincipalId is not null)
+        if (removed && peer.Role == PrincipalRole.Device && peer.PrincipalId is not null && peer.IsReady)
         {
             await BroadcastPresenceAsync(peer.PrincipalId, online: false, cancellationToken).ConfigureAwait(false);
+            var cancelled = await _pairing.CancelForDeviceAsync(peer.PrincipalId, cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var pending in _pendingPairings.RemoveMany(cancelled))
+            {
+                pending.Peer.TrySend(RelayEnvelope.Create(
+                    RelayMessageTypes.PairingDenied,
+                    new PairingDeniedPayload(pending.PairingRequestId, "DEVICE_OFFLINE", "Device went offline."),
+                    pending.OriginalRequestId,
+                    peer.PrincipalId,
+                    pending.ControllerId));
+            }
         }
     }
 
@@ -90,8 +105,29 @@ public sealed class RelayRouter
             return;
         }
 
+        if (!peer.IsReady && envelope.Type is not (RelayMessageTypes.DeviceReady or RelayMessageTypes.PairingRevoke))
+        {
+            await SendErrorAsync(peer, envelope.RequestId, "DEVICE_NOT_READY", "Device synchronization is incomplete.")
+                .ConfigureAwait(false);
+            return;
+        }
+
         switch (envelope.Type)
         {
+            case RelayMessageTypes.DeviceReady:
+                if (!peer.IsReady)
+                {
+                    peer.MarkReady();
+                    _connections.Register(peer);
+                    await BroadcastPresenceAsync(deviceId, online: true, cancellationToken).ConfigureAwait(false);
+                }
+
+                peer.TrySend(RelayEnvelope.Create(
+                    RelayMessageTypes.DeviceReadyAck,
+                    new { },
+                    envelope.RequestId,
+                    deviceId));
+                break;
             case RelayMessageTypes.PairingCreate:
                 {
                     var result = await _pairing.CreateAsync(deviceId, cancellationToken).ConfigureAwait(false);
@@ -111,6 +147,45 @@ public sealed class RelayRouter
 
                     break;
                 }
+            case RelayMessageTypes.PairingConfirmationResolve:
+                await ResolvePairingAsync(peer, envelope, cancellationToken).ConfigureAwait(false);
+                break;
+            case RelayMessageTypes.PairingList:
+                {
+                    var controllers = await _pairing.ListControllersAsync(deviceId, cancellationToken)
+                        .ConfigureAwait(false);
+                    peer.TrySend(RelayEnvelope.Create(
+                        RelayMessageTypes.PairingListResult,
+                        new PairingListResultPayload(controllers),
+                        envelope.RequestId,
+                        deviceId));
+                    break;
+                }
+            case RelayMessageTypes.PairingUpdate:
+                {
+                    var result = await _pairing.UpdateAsync(
+                        deviceId,
+                        envelope.ReadPayload<PairingUpdatePayload>(),
+                        cancellationToken).ConfigureAwait(false);
+                    if (result.Succeeded)
+                    {
+                        peer.TrySend(RelayEnvelope.Create(
+                            RelayMessageTypes.PairingUpdated,
+                            result.Value!,
+                            envelope.RequestId,
+                            deviceId));
+                    }
+                    else
+                    {
+                        await SendErrorAsync(peer, envelope.RequestId, result.ErrorCode!, result.ErrorMessage!)
+                            .ConfigureAwait(false);
+                    }
+
+                    break;
+                }
+            case RelayMessageTypes.PairingRevoke:
+                await RevokePairingFromDeviceAsync(peer, envelope, cancellationToken).ConfigureAwait(false);
+                break;
             case RelayMessageTypes.CodexSnapshot:
                 await SaveSnapshotAsync(deviceId, envelope, cancellationToken).ConfigureAwait(false);
                 await BroadcastToControllersAsync(deviceId, envelope with { DeviceId = deviceId }, cancellationToken)
@@ -178,6 +253,7 @@ public sealed class RelayRouter
             case RelayMessageTypes.ControlThreadResume:
                 await RouteControlAsync(peer, envelope, cancellationToken).ConfigureAwait(false);
                 break;
+            case RelayMessageTypes.PairingRevoke:
             case RelayMessageTypes.PairingRevoked:
                 await RevokePairingAsync(peer, envelope, cancellationToken).ConfigureAwait(false);
                 break;
@@ -281,6 +357,103 @@ public sealed class RelayRouter
             envelope.RequestId,
             "routed",
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ResolvePairingAsync(
+        RelayPeer device,
+        RelayEnvelope envelope,
+        CancellationToken cancellationToken)
+    {
+        var payload = envelope.ReadPayload<PairingConfirmationResolvePayload>();
+        var result = await _pairing.ResolveAsync(device.PrincipalId!, payload, cancellationToken)
+            .ConfigureAwait(false);
+        if (!result.Succeeded)
+        {
+            await SendErrorAsync(device, envelope.RequestId, result.ErrorCode!, result.ErrorMessage!)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var resolved = result.Value!;
+        _pendingPairings.TryRemove(resolved.PairingRequestId, out var pending);
+        if (!resolved.Allowed)
+        {
+            var denied = new PairingDeniedPayload(
+                resolved.PairingRequestId,
+                "PAIRING_DENIED",
+                "Pairing was denied on the Device.");
+            device.TrySend(RelayEnvelope.Create(
+                RelayMessageTypes.PairingDenied,
+                denied,
+                envelope.RequestId,
+                resolved.DeviceId,
+                resolved.ControllerId));
+            pending?.Peer.TrySend(RelayEnvelope.Create(
+                RelayMessageTypes.PairingDenied,
+                denied,
+                pending.OriginalRequestId,
+                resolved.DeviceId,
+                resolved.ControllerId));
+            return;
+        }
+
+        var completed = new PairingCompletedPayload(
+            resolved.DeviceId,
+            resolved.ControllerId,
+            resolved.Permissions,
+            typeof(RelayRouter).Assembly.GetName().Version?.ToString(3));
+        device.TrySend(RelayEnvelope.Create(
+            RelayMessageTypes.PairingCompleted,
+            completed,
+            envelope.RequestId,
+            resolved.DeviceId,
+            resolved.ControllerId));
+        if (pending is not null)
+        {
+            pending.Peer.Authenticate(PrincipalRole.Controller, resolved.ControllerId);
+            await OnAuthenticatedAsync(pending.Peer, cancellationToken).ConfigureAwait(false);
+            pending.Peer.TrySend(RelayEnvelope.Create(
+                RelayMessageTypes.PairingCompleted,
+                completed,
+                pending.OriginalRequestId,
+                resolved.DeviceId,
+                resolved.ControllerId));
+        }
+    }
+
+    private async Task RevokePairingFromDeviceAsync(
+        RelayPeer device,
+        RelayEnvelope envelope,
+        CancellationToken cancellationToken)
+    {
+        var payload = envelope.ReadPayload<PairingRevokePayload>();
+        var controllers = await _pairing.ListControllersAsync(device.PrincipalId!, cancellationToken)
+            .ConfigureAwait(false);
+        var target = controllers.SingleOrDefault(value => value.PairingId == payload.PairingId && !value.Revoked);
+        if (target is null ||
+            !await _pairing.RevokeByIdAsync(device.PrincipalId!, payload.PairingId, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            await SendErrorAsync(device, envelope.RequestId, "PAIRING_NOT_FOUND", "Pairing was not found.")
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var revoked = new PairingRevokedPayload(device.PrincipalId!, target.ControllerId);
+        device.TrySend(RelayEnvelope.Create(
+            RelayMessageTypes.PairingRevoked,
+            revoked,
+            envelope.RequestId,
+            device.PrincipalId,
+            target.ControllerId));
+        foreach (var controller in _connections.GetControllers(target.ControllerId))
+        {
+            controller.TrySend(RelayEnvelope.Create(
+                RelayMessageTypes.PairingRevoked,
+                revoked,
+                deviceId: device.PrincipalId,
+                controllerId: target.ControllerId));
+        }
     }
 
     private async Task RevokePairingAsync(

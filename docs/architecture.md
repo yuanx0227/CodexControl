@@ -30,6 +30,9 @@ Codex TUI
   │ ws://127.0.0.1:<port>
   ▼
 CodexControlAgent.exe (.NET 8 / Windows)
+  ├─ WinForms Tray / Settings Adapter
+  ├─ AgentSettingsStore / AgentStateStore (`data\`)
+  ├─ AgentRuntimeCoordinator
   ├─ CodexRuntimeResolver (CLI / Desktop bundle staging)
   ├─ CodexExecutableProbe
   ├─ AppServerBridge
@@ -122,9 +125,11 @@ Snapshot 是不可变对象并带单调 `revision`。Domain Event 只包含移�
 
 ```text
 历史: control.thread.list -> thread/list
-读取: control.thread.read -> thread/read(includeTurns=false) + thread/items/list(desc, paged)
+读取: control.thread.read -> thread/read(includeTurns=false)
+                            + thread/items/list(desc, paged)
+                            + thread/turns/list(summary, duration)
                             -> 当前 Desktop 不支持时回退 thread/read(includeTurns=true)
-                            -> 受限用户/助手消息
+                            -> 受限用户/助手/过程摘要与图片缩略图
 新建: control.thread.start -> thread/start -> turn/start
 恢复: control.thread.resume -> thread/resume -> turn/start
 ```
@@ -172,7 +177,7 @@ auth.hello
 
 Challenge 成功、过期或使用后立即移除，重复响应失败。
 
-## 5. 六位配对
+## 5. 二维码与六位码配对 v2
 
 固定规则：
 
@@ -180,7 +185,8 @@ Challenge 成功、过期或使用后立即移除，重复响应失败。
 TTL: 180 秒
 Proof 失败上限: 5
 同 Device 有效 Session: 1
-成功后: 立即 consumed
+首个有效 Claim: PairingSession 立即 consumed
+本机确认: 60 秒
 重新生成: 旧 Session 失效
 ```
 
@@ -189,7 +195,10 @@ Proof 失败上限: 5
 - `CodeHash = HMAC(secret, sessionId + code)`：最终等值验证；
 - `CodeLookupHash = HMAC(secret, code)`：安全查找并避免活动码碰撞。
 
-两者都不是明文码。Controller Claim 同时携带对 Controller ID、public key、code 和随机 nonce 的自签名 proof。
+两者都不是明文码。Controller Claim 的 v2 proof 同时签名 Controller ID、Controller Name、
+public key、code 和随机 nonce。Claim 只创建 Pending Request；电脑本机选择 Full、ViewOnly
+或 Deny 后，Relay 才创建 Pairing。Device 认证后先同步离线撤销项，发送 `device.ready`
+后才发布 Online 并接受 Control。
 
 ## 6. Relay
 
@@ -226,6 +235,7 @@ Devices
 Controllers
 Pairings
 PairingSessions
+PairingRequests
 AuditEvents
 ```
 
@@ -235,7 +245,8 @@ Relay 不持久化完整事件流，只保存最新 Snapshot 和必要审计元�
 
 移动优先 React UI：
 
-- 六位码配对；
+- 二维码与六位码备用配对；
+- Relay 摘要确认、电脑二次确认和 Pending 状态；
 - 多设备列表与在线状态；
 - 桌面固定会话侧栏 / 移动端抽屉；
 - 中央对话消息流与底部固定 Composer；
@@ -247,12 +258,17 @@ Relay 不持久化完整事件流，只保存最新 Snapshot 和必要审计元�
 - Steer；
 - Interrupting/Interrupted 两阶段语义；
 - app-server 原始 Decision 审批；
+- 安全 GFM Markdown、受控图片缩略图、Turn 耗时和默认折叠过程摘要；
 - 解除配对；
 - Service Worker 与 Manifest。
 
 侧栏优先使用 `project/list.position` 与 `thread.projectId`；当前 Desktop 返回空项目目录时，真实工作 `cwd` 兼容为项目，`Documents\Codex\YYYY-MM-DD` 自动会话目录归入“最近”。项目行有文件夹图标和项目内新建入口；“最近”任务直接显示且没有“＋”。项目内与最近任务均按 `recencyAt` 降序。侧栏、消息流和 Composer 分属独立布局行。
 
-`item/agentMessage/delta` 被规范化为 `AgentMessageDelta`，PWA 按 `itemId` 合并到同一助手消息并立即显示；闪烁光标提供打字机反馈。`AgentMessageCompleted` 用最终正文替换流式条目，`TurnCompleted` 后在后台刷新历史和侧栏，不遮挡当前 Composer。
+`item/agentMessage/delta` 被规范化为 `AgentMessageDelta`，PWA 按 `itemId` 合并到同一助手消息并立即显示；闪烁光标提供打字机反馈。0.6.0 起不再周期读取完整历史：Agent 托管会话只消费同一 app-server 推送的 Thread、Turn、Item 和 Approval Domain Events，Turn 完成后仅执行一次有界历史核对。最终正文使用不执行原始 HTML 的 GFM Markdown。`Command/File` 过程按 Turn 合并进默认关闭的摘要；文件 diff 只统计新增/删除行并显示每文件及总计，不传完整 diff。
+
+独立 Agent 无法订阅另一个 Codex Desktop app-server 进程内部的事件。此类 Thread 显示为“Desktop 外部会话（状态不可订阅）”，只在用户明确打开或手动刷新时读取历史；用户从 PWA 恢复后，它才成为 Agent 托管会话并进入事件驱动链路。PWA 按 Thread 保存无正文的活动时间/状态和已读时间，派生运行、未读、完成未读与失败未读标志。
+
+消息流首次打开时定位到底部；后续事件仅在用户原本位于底部时自动跟随。用户向上阅读时保存滚动锚点，显示“新消息”按钮，不再因历史对象替换而重置位置。
 
 同一浏览器身份可以同时打开多个标签页。Relay 为 Device 保留单连接替换语义，但按 `controllerId + connectionId` 保存全部 Controller 页面；Presence、Snapshot、Event 和 Control Result 会发送给该 Controller 身份的所有活动页面，未发起请求的页面会忽略不匹配的 `requestId`。
 
@@ -276,7 +292,7 @@ Agent backoff：
 
 Controller backoff 为 `0.5s, 1s, 2s, 5s, 10s...`。两者都带 0–20% jitter。重连后先认证并恢复设备列表；只读历史列表/正文请求会等待 Controller 与 Agent 都恢复在线后自动重试。Device 使用 connection replacement fencing，Controller 多标签互不替换。
 
-若 Codex app-server 异常退出，Agent 进程不退出；它按 `1s, 2s, 5s, 10s, 30s...` 重建 app-server bridge、localhost proxy 与 Relay session。历史正文优先使用 `thread/items/list` 分页；当前 Desktop 返回 `not supported yet` 时回退完整 `thread/read`，但 app-server 内部消息上限提升到 128MB，随后仍只映射受限的最近用户/助手消息。
+若 Codex app-server 异常退出，Agent 进程不退出；它按 `1s, 2s, 5s, 10s, 30s...` 重建 app-server bridge、localhost proxy 与 Relay session。历史正文优先使用 `thread/items/list` 分页并以 `thread/turns/list` 补齐耗时；当前 Desktop 返回 `not supported yet` 时回退完整 `thread/read`，但 app-server 内部消息上限提升到 128MB，随后仍只映射受限的最近消息、过程摘要和有界图片缩略图。
 
 ## 9. 部署
 

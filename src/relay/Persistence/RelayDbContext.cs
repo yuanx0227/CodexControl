@@ -8,6 +8,7 @@ public sealed class RelayDbContext(DbContextOptions<RelayDbContext> options) : D
     public DbSet<ControllerEntity> Controllers => Set<ControllerEntity>();
     public DbSet<PairingEntity> Pairings => Set<PairingEntity>();
     public DbSet<PairingSessionEntity> PairingSessions => Set<PairingSessionEntity>();
+    public DbSet<PairingRequestEntity> PairingRequests => Set<PairingRequestEntity>();
     public DbSet<AuditEventEntity> AuditEvents => Set<AuditEventEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -54,6 +55,18 @@ public sealed class RelayDbContext(DbContextOptions<RelayDbContext> options) : D
                 .WithMany()
                 .HasForeignKey(value => value.DeviceId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<PairingRequestEntity>(entity =>
+        {
+            entity.HasKey(value => value.Id);
+            entity.HasIndex(value => value.SessionId).IsUnique();
+            entity.HasIndex(value => value.DeviceId);
+            entity.HasIndex(value => value.ExpiresAt);
+            entity.Property(value => value.ControllerId).HasMaxLength(80);
+            entity.Property(value => value.ControllerName).HasMaxLength(200);
+            entity.Property(value => value.PublicKey).HasMaxLength(200);
+            entity.Property(value => value.Outcome).HasMaxLength(40);
         });
 
         modelBuilder.Entity<AuditEventEntity>(entity =>

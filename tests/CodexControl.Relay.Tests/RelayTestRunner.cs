@@ -41,6 +41,7 @@ internal static class RelayTestRunner
             await TestHealthAsync(baseUri).ConfigureAwait(false);
             await TestRegisteredDeviceReconnectBurstAsync(baseUri).ConfigureAwait(false);
             await TestPairingRoutingAndReconnectAsync(app, baseUri).ConfigureAwait(false);
+            await TestPairingApprovalV2Async(app, baseUri).ConfigureAwait(false);
             await TestSecurityBoundariesAsync(app).ConfigureAwait(false);
             await TestMultiDeviceIsolationAsync(app).ConfigureAwait(false);
             await VerifyDatabaseAsync(app).ConfigureAwait(false);
@@ -48,10 +49,11 @@ internal static class RelayTestRunner
             Console.WriteLine("PASS Relay_Health_Migration");
             Console.WriteLine("PASS Relay_RegisteredDevice_ReconnectBurst");
             Console.WriteLine("PASS Relay_Auth_Pairing_Routing_Reconnect");
+            Console.WriteLine("PASS Relay_PairingV2_Confirm_Permission_Revoke");
             Console.WriteLine("PASS Relay_Expiry_AttemptLimit_ChallengeReplay");
             Console.WriteLine("PASS Relay_OneController_ThreeDevices_Isolation");
             Console.WriteLine("PASS Relay_Persistence_NoPlaintextCode");
-            Console.WriteLine("RESULT total=6 passed=6 failed=0");
+            Console.WriteLine("RESULT total=7 passed=7 failed=0");
             return 0;
         }
         catch (Exception exception)
@@ -153,8 +155,24 @@ internal static class RelayTestRunner
             controller.CreatePairingClaim(pairingCreated.Code),
             claimRequestId,
             controllerId: controller.PrincipalId)).ConfigureAwait(false);
+        var pending = (await controller.ReceiveAsync(RelayMessageTypes.PairingPending)
+            .ConfigureAwait(false)).ReadPayload<PairingPendingPayload>();
+        var confirmation = (await device.ReceiveAsync(RelayMessageTypes.PairingConfirmationRequested)
+            .ConfigureAwait(false)).ReadPayload<PairingConfirmationRequestedPayload>();
+        Assert(pending.PairingRequestId == confirmation.PairingRequestId,
+            "controller pending and device confirmation must identify the same request");
+        var confirmationRequestId = RelayTestClient.NewRequestId();
+        await device.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingConfirmationResolve,
+            new PairingConfirmationResolvePayload(
+                confirmation.PairingRequestId,
+                PairingDecision.Allow,
+                PairingPermissionProfile.Full),
+            confirmationRequestId,
+            device.PrincipalId,
+            controller.PrincipalId)).ConfigureAwait(false);
         _ = await controller.ReceiveAsync(RelayMessageTypes.PairingCompleted, claimRequestId).ConfigureAwait(false);
-        _ = await device.ReceiveAsync(RelayMessageTypes.PairingCompleted, claimRequestId).ConfigureAwait(false);
+        _ = await device.ReceiveAsync(RelayMessageTypes.PairingCompleted, confirmationRequestId).ConfigureAwait(false);
 
         var listRequestId = RelayTestClient.NewRequestId();
         await controller.SendAsync(RelayEnvelope.Create(
@@ -357,6 +375,139 @@ internal static class RelayTestRunner
         Assert(await db.AuditEvents.AnyAsync().ConfigureAwait(false), "audit metadata should persist");
     }
 
+    private static async Task TestPairingApprovalV2Async(WebApplication app, Uri baseUri)
+    {
+        await using var device = new RelayTestClient(
+            PrincipalRole.Device,
+            string.Concat("dev_", Guid.NewGuid().ToString("N")),
+            "PAIRING-V2-PC");
+        await device.ConnectAsync(baseUri).ConfigureAwait(false);
+        await device.RegisterAndAuthenticateDeviceAsync(markDeviceReady: false).ConfigureAwait(false);
+        var blockedCreateId = RelayTestClient.NewRequestId();
+        await device.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingCreate,
+            new PairingCreatePayload(),
+            blockedCreateId,
+            device.PrincipalId)).ConfigureAwait(false);
+        var blocked = (await device.ReceiveAsync(RelayMessageTypes.Error, blockedCreateId)
+            .ConfigureAwait(false)).ReadPayload<ErrorPayload>();
+        Assert(blocked.Code == "DEVICE_NOT_READY", "unready Device must not create pairing codes");
+        await device.MarkDeviceReadyAsync().ConfigureAwait(false);
+
+        await using var controller = new RelayTestClient(
+            PrincipalRole.Controller,
+            string.Concat("ctl_", Guid.NewGuid().ToString("N")),
+            "Pairing v2 Phone");
+        await controller.ConnectAsync(baseUri).ConfigureAwait(false);
+
+        var deniedCode = await CreatePairingCodeAsync(device).ConfigureAwait(false);
+        var deniedClaimId = RelayTestClient.NewRequestId();
+        await controller.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingClaim,
+            controller.CreatePairingClaim(deniedCode),
+            deniedClaimId,
+            controllerId: controller.PrincipalId)).ConfigureAwait(false);
+        var deniedPending = (await controller.ReceiveAsync(RelayMessageTypes.PairingPending)
+            .ConfigureAwait(false)).ReadPayload<PairingPendingPayload>();
+        _ = await device.ReceiveAsync(RelayMessageTypes.PairingConfirmationRequested).ConfigureAwait(false);
+        var denyId = RelayTestClient.NewRequestId();
+        await device.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingConfirmationResolve,
+            new PairingConfirmationResolvePayload(
+                deniedPending.PairingRequestId,
+                PairingDecision.Deny,
+                PairingPermissionProfile.ViewOnly),
+            denyId,
+            device.PrincipalId,
+            controller.PrincipalId)).ConfigureAwait(false);
+        _ = await controller.ReceiveAsync(RelayMessageTypes.PairingDenied, deniedClaimId).ConfigureAwait(false);
+        _ = await device.ReceiveAsync(RelayMessageTypes.PairingDenied, denyId).ConfigureAwait(false);
+
+        var viewCode = await CreatePairingCodeAsync(device).ConfigureAwait(false);
+        var viewClaimId = RelayTestClient.NewRequestId();
+        await controller.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingClaim,
+            controller.CreatePairingClaim(viewCode),
+            viewClaimId,
+            controllerId: controller.PrincipalId)).ConfigureAwait(false);
+        var viewPending = (await controller.ReceiveAsync(RelayMessageTypes.PairingPending)
+            .ConfigureAwait(false)).ReadPayload<PairingPendingPayload>();
+        _ = await device.ReceiveAsync(RelayMessageTypes.PairingConfirmationRequested).ConfigureAwait(false);
+        var allowViewId = RelayTestClient.NewRequestId();
+        await device.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingConfirmationResolve,
+            new PairingConfirmationResolvePayload(
+                viewPending.PairingRequestId,
+                PairingDecision.Allow,
+                PairingPermissionProfile.ViewOnly),
+            allowViewId,
+            device.PrincipalId,
+            controller.PrincipalId)).ConfigureAwait(false);
+        _ = await controller.ReceiveAsync(RelayMessageTypes.PairingCompleted, viewClaimId).ConfigureAwait(false);
+        _ = await device.ReceiveAsync(RelayMessageTypes.PairingCompleted, allowViewId).ConfigureAwait(false);
+
+        var listId = RelayTestClient.NewRequestId();
+        await device.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingList,
+            new PairingListPayload(),
+            listId,
+            device.PrincipalId)).ConfigureAwait(false);
+        var list = (await device.ReceiveAsync(RelayMessageTypes.PairingListResult, listId)
+            .ConfigureAwait(false)).ReadPayload<PairingListResultPayload>();
+        var paired = list.Controllers.Single(value => value.ControllerId == controller.PrincipalId && !value.Revoked);
+        Assert(paired.Permissions.View && !paired.Permissions.Steer && !paired.Permissions.Approval,
+            "ViewOnly pairing must deny mutating permissions");
+
+        var deniedControlId = RelayTestClient.NewRequestId();
+        await controller.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.ControlSteer,
+            new SteerControlPayload("thr-v2", "turn-v2", "must be denied"),
+            deniedControlId,
+            device.PrincipalId,
+            controller.PrincipalId)).ConfigureAwait(false);
+        var deniedControl = (await controller.ReceiveAsync(RelayMessageTypes.ControlResult, deniedControlId)
+            .ConfigureAwait(false)).ReadPayload<ControlResultPayload>();
+        Assert(deniedControl.Code == "PERMISSION_DENIED", "ViewOnly controller must not steer");
+
+        var updateId = RelayTestClient.NewRequestId();
+        await device.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingUpdate,
+            new PairingUpdatePayload(paired.PairingId, "My Phone", PairingPermissionProfile.Full),
+            updateId,
+            device.PrincipalId)).ConfigureAwait(false);
+        var updated = (await device.ReceiveAsync(RelayMessageTypes.PairingUpdated, updateId)
+            .ConfigureAwait(false)).ReadPayload<PairingUpdatedPayload>();
+        Assert(updated.Alias == "My Phone" && updated.Permissions.Steer,
+            "Device should update Pairing alias and permission profile");
+
+        var revokeId = RelayTestClient.NewRequestId();
+        await device.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingRevoke,
+            new PairingRevokePayload(paired.PairingId),
+            revokeId,
+            device.PrincipalId)).ConfigureAwait(false);
+        _ = await device.ReceiveAsync(RelayMessageTypes.PairingRevoked, revokeId).ConfigureAwait(false);
+        _ = await controller.ReceiveAsync(RelayMessageTypes.PairingRevoked).ConfigureAwait(false);
+
+        var factory = app.Services.GetRequiredService<IDbContextFactory<RelayDbContext>>();
+        await using var db = await factory.CreateDbContextAsync().ConfigureAwait(false);
+        Assert(await db.Pairings.CountAsync(value => value.DeviceId == device.PrincipalId && value.RevokedAt == null)
+                .ConfigureAwait(false) == 0,
+            "denied and revoked v2 Pairings must leave no active permission");
+    }
+
+    private static async Task<string> CreatePairingCodeAsync(RelayTestClient device)
+    {
+        var requestId = RelayTestClient.NewRequestId();
+        await device.SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.PairingCreate,
+            new PairingCreatePayload(),
+            requestId,
+            device.PrincipalId)).ConfigureAwait(false);
+        return (await device.ReceiveAsync(RelayMessageTypes.PairingCreated, requestId)
+            .ConfigureAwait(false)).ReadPayload<PairingCreatedPayload>().Code;
+    }
+
     private static async Task TestSecurityBoundariesAsync(WebApplication app)
     {
         var challenges = new ChallengeStore();
@@ -412,7 +563,8 @@ internal static class RelayTestRunner
             nonce,
             P256Keys.Sign(
                 controllerKey,
-                PairingProofCanonicalPayload.Build(expired.Value.Code, controllerId, publicKey, nonce)));
+                PairingProofCanonicalPayload.Build(
+                    expired.Value.Code, controllerId, "Expired Controller", publicKey, nonce)));
         var expiredResult = await pairingService.ClaimAsync(expiredPayload, CancellationToken.None).ConfigureAwait(false);
         Assert(!expiredResult.Succeeded && expiredResult.ErrorCode == "PAIRING_INVALID", "expired code must fail");
 
@@ -490,9 +642,19 @@ internal static class RelayTestRunner
                 nonce,
                 P256Keys.Sign(
                     controllerKey,
-                    PairingProofCanonicalPayload.Build(pairing.Value.Code, controllerId, publicKey, nonce)));
+                    PairingProofCanonicalPayload.Build(
+                        pairing.Value.Code, controllerId, "Multi Device Controller", publicKey, nonce)));
             var claimed = await pairingService.ClaimAsync(claim, CancellationToken.None).ConfigureAwait(false);
             Assert(claimed.Succeeded, "same controller should pair each device");
+            var resolved = await pairingService.ResolveAsync(
+                deviceId,
+                new PairingConfirmationResolvePayload(
+                    claimed.Value!.PairingRequestId,
+                    PairingDecision.Allow,
+                    PairingPermissionProfile.Full),
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(resolved.Succeeded && resolved.Value!.Allowed,
+                "device confirmation should complete each pairing");
         }
 
         var listed = await pairingService.ListDevicesAsync(controllerId, CancellationToken.None).ConfigureAwait(false);
@@ -532,6 +694,6 @@ internal static class RelayTestRunner
             nonce,
             P256Keys.Sign(
                 key,
-                PairingProofCanonicalPayload.Build(code, controllerId, publicKey, nonce)));
+                PairingProofCanonicalPayload.Build(code, controllerId, name, publicKey, nonce)));
     }
 }

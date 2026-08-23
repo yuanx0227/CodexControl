@@ -15,6 +15,7 @@ public sealed class RelayWebSocketHandler
     private readonly RelayOptions _options;
     private readonly AuthService _auth;
     private readonly PairingService _pairing;
+    private readonly PendingPairingConnections _pendingPairings;
     private readonly RelayRouter _router;
     private readonly ConnectionRegistry _connections;
     private readonly SlidingWindowRateLimiter _rateLimiter;
@@ -24,6 +25,7 @@ public sealed class RelayWebSocketHandler
         RelayOptions options,
         AuthService auth,
         PairingService pairing,
+        PendingPairingConnections pendingPairings,
         RelayRouter router,
         ConnectionRegistry connections,
         SlidingWindowRateLimiter rateLimiter,
@@ -32,6 +34,7 @@ public sealed class RelayWebSocketHandler
         _options = options;
         _auth = auth;
         _pairing = pairing;
+        _pendingPairings = pendingPairings;
         _router = router;
         _connections = connections;
         _rateLimiter = rateLimiter;
@@ -108,6 +111,7 @@ public sealed class RelayWebSocketHandler
         }
         finally
         {
+            _pendingPairings.RemovePeer(peer);
             if (peer.IsAuthenticated)
             {
                 await _router.OnDisconnectedAsync(peer, CancellationToken.None).ConfigureAwait(false);
@@ -281,24 +285,44 @@ public sealed class RelayWebSocketHandler
             return;
         }
 
-        peer.Authenticate(PrincipalRole.Controller, result.Value!.ControllerId);
-        await _router.OnAuthenticatedAsync(peer, cancellationToken).ConfigureAwait(false);
-        var completed = new PairingCompletedPayload(
-            result.Value.DeviceId,
-            result.Value.ControllerId,
-            result.Value.Permissions);
+        var pending = result.Value!;
+        var originalRequestId = envelope.RequestId ?? string.Concat("req_", Guid.NewGuid().ToString("N"));
+        _pendingPairings.Add(new PendingPairingConnection(
+            pending.PairingRequestId,
+            originalRequestId,
+            pending.ControllerId,
+            peer));
         peer.TrySend(RelayEnvelope.Create(
-            RelayMessageTypes.PairingCompleted,
-            completed,
-            envelope.RequestId,
-            result.Value.DeviceId,
-            result.Value.ControllerId));
-        _connections.GetDevice(result.Value.DeviceId)?.TrySend(RelayEnvelope.Create(
-            RelayMessageTypes.PairingCompleted,
-            completed,
-            envelope.RequestId,
-            result.Value.DeviceId,
-            result.Value.ControllerId));
+            RelayMessageTypes.PairingPending,
+            new PairingPendingPayload(
+                pending.PairingRequestId,
+                pending.DeviceId,
+                pending.ControllerId,
+                pending.ExpiresAt),
+            deviceId: pending.DeviceId,
+            controllerId: pending.ControllerId));
+        var device = _connections.GetDevice(pending.DeviceId);
+        if (device is null || !device.TrySend(RelayEnvelope.Create(
+                RelayMessageTypes.PairingConfirmationRequested,
+                new PairingConfirmationRequestedPayload(
+                    pending.PairingRequestId,
+                    pending.ControllerId,
+                    pending.ControllerName,
+                    pending.PublicKeyFingerprint,
+                    pending.ExpiresAt),
+                deviceId: pending.DeviceId,
+                controllerId: pending.ControllerId)))
+        {
+            _pendingPairings.TryRemove(pending.PairingRequestId, out _);
+            _ = await _pairing.ResolveAsync(
+                pending.DeviceId,
+                new PairingConfirmationResolvePayload(
+                    pending.PairingRequestId,
+                    PairingDecision.Deny,
+                    PairingPermissionProfile.ViewOnly),
+                cancellationToken).ConfigureAwait(false);
+            SendError(peer, originalRequestId, "DEVICE_OFFLINE", "Device is offline.");
+        }
     }
 
     private static void SendError(RelayPeer peer, string? requestId, string code, string message)

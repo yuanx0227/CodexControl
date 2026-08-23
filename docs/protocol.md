@@ -1,6 +1,6 @@
-# Codex Control Relay Protocol v1
+# Codex Control Relay Protocol v2
 
-状态：MVP v1 实现与互操作基线。
+状态：v2 电脑确认配对、权限档位与 Device Ready Gate 实现基线。
 
 ## 1. 协议分层
 
@@ -9,7 +9,7 @@ Codex Control 有两套互不混用的协议：
 1. **Codex App Server JSON-RPC**：只存在于 Agent 与本地 app-server/TUI 之间，字段以执行中的 Codex CLI Schema 为准。
 2. **Codex Control Relay Protocol**：Device、Relay、Controller/PWA 之间的稳定 Domain Protocol，不暴露 Codex 原始 JSON-RPC。
 
-Relay Protocol 版本为整数 `1`。新增可选字段不提升主版本；删除字段、改变语义或改变签名串必须提升主版本。
+Relay Protocol 版本为整数 `2`。v1 Claim 即授权入口不再兼容。
 
 ## 2. Transport
 
@@ -31,7 +31,7 @@ Relay Protocol 版本为整数 `1`。新增可选字段不提升主版本；删�
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "type": "device.status",
   "messageId": "019d0000-0000-7000-8000-000000000001",
   "requestId": null,
@@ -46,7 +46,7 @@ Relay Protocol 版本为整数 `1`。新增可选字段不提升主版本；删�
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `version` | 是 | 当前固定为 `1` |
+| `version` | 是 | 当前固定为 `2` |
 | `type` | 是 | 集中定义的消息类型 |
 | `messageId` | 是 | 每条消息唯一 UUID；用于去重和审计关联 |
 | `requestId` | 否 | 请求/响应关联 ID；事件为 `null` |
@@ -76,7 +76,16 @@ device.registered
 pairing.create
 pairing.created
 pairing.claim
+pairing.pending
+pairing.confirmation.requested
+pairing.confirmation.resolve
 pairing.completed
+pairing.denied
+pairing.list
+pairing.list.result
+pairing.update
+pairing.updated
+pairing.revoke
 pairing.revoked
 ```
 
@@ -84,6 +93,8 @@ pairing.revoked
 
 ```text
 device.online
+device.ready
+device.ready.ack
 device.offline
 device.status
 device.list
@@ -165,7 +176,7 @@ base64url without padding
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "type": "auth.hello",
   "messageId": "uuid",
   "requestId": "auth-1",
@@ -183,7 +194,7 @@ base64url without padding
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "type": "auth.challenge",
   "messageId": "uuid",
   "requestId": "auth-1",
@@ -225,7 +236,7 @@ codex-control-auth-v1
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "type": "auth.response",
   "messageId": "uuid",
   "requestId": "auth-1",
@@ -283,7 +294,7 @@ Relay 返回：
 }
 ```
 
-Relay 数据库不得保存 `code` 明文。v1 使用两个分域 HMAC：
+Relay 数据库不得保存 `code` 明文。v2 继续使用两个分域 HMAC：
 
 ```text
 codeHash = HMAC-SHA256(serverPairingSecret,
@@ -316,20 +327,34 @@ Controller 在本地生成身份后提交：
 
 `proofSignature` 的精确 canonical payload 在实现前由跨平台测试向量锁定。Claim 校验顺序必须避免泄露某个 Code 是否存在；外部统一返回 `PAIRING_INVALID`，内部审计可区分过期、尝试超限和签名失败。
 
-成功时一个数据库事务内：
+Claim 成功时一个数据库事务内：
 
 1. 锁定 Pairing Session；
 2. 再次检查未过期、未销毁和尝试次数；
 3. 验证 Controller key proof；
-4. upsert Controller；
-5. 创建 Pairing；
-6. 标记 Session consumed；
-7. 提交；
-8. 向 Device 和 Controller 发送 `pairing.completed`。
+4. 标记 Session consumed；
+5. 创建 60 秒 `PairingRequest`；
+6. 向 Controller 发送 `pairing.pending`；
+7. 向 Device 发送 `pairing.confirmation.requested`。
+
+Device 必须在本机选择 `Allow Full`、`Allow ViewOnly` 或 `Deny`，并发送
+`pairing.confirmation.resolve`。只有 Allow 才 upsert Controller/Pairing 并发送
+`pairing.completed`；Deny、60 秒超时、Device 断线或暂停均终结请求且不授予权限。
+
+Proof canonical payload：
+
+```text
+codex-control-pairing-proof-v2
+<code>
+<controllerId>
+<controllerName>
+<publicKey>
+<proofNonce>
+```
 
 ## 8. Pairing Permission
 
-v1 权限结构：
+v2 权限结构：
 
 ```json
 {
@@ -340,7 +365,11 @@ v1 权限结构：
 }
 ```
 
-默认全部为 `true`，但每个 Control 请求仍必须逐项检查。解除配对后立即拒绝新请求；已在途命令必须在执行前再次检查授权版本。
+权限档位：`Full=true/true/true/true`；`ViewOnly=true/false/false/false`。
+每个 Control 请求仍必须逐项检查。权限更新和撤销由 Device 设置页发起并原子生效。
+
+Device 长期认证后先处于 `Synchronizing`，只能同步待撤销项；收到 `device.ready`
+并返回 `device.ready.ack` 后才注册为 Online 和接受 Control。
 
 ## 9. Presence 与 Heartbeat
 
@@ -440,6 +469,14 @@ UserInputRequested
 ErrorOccurred
 ```
 
+`FileChanged.data.changes[]` 包含 `path`、可选 `kind`、`additions` 和 `deletions`；`paths[]` 继续保留用于旧 PWA 兼容。Agent 只从 app-server 的 unified diff 计算行数，不把完整 diff 下发 Relay。历史 `entries[].changes[]` 使用相同字段，使实时和刷新后的影响文件摘要一致。
+
+`control.thread.read.result.turns[]` 包含 `turnId`、`status`、`startedAt`、`completedAt` 和 `durationMs`，只用于首次历史与完成核对；PWA 不用它轮询推断另一个 Desktop app-server 的活动状态。
+
+`auth.ok.serverVersion` 与 `pairing.completed.serverVersion` 提供 Relay 版本；`codex.snapshot.agentVersion` 提供 Agent 版本。PWA 自身版本从构建时 `package.json` 获取，并与固定 Protocol v2 一起展示。
+
+Agent 托管 Thread 的增量源是 `codex.event`。Controller 仅在首次打开读取历史，随后按 `eventId/threadId/itemId/occurredAt` 合并事件；Turn 完成后允许一次 `control.thread.read` 核对。Controller 本地只保存每个 Thread 的最新活动时间、状态和已读时间，不保存协议正文副本。
+
 Relay 默认不持久化完整 `data`；审计只保留 event kind、标识符、时间、结果和必要摘要。
 
 ## 12. 真实会话控制
@@ -472,7 +509,11 @@ Device 调用 `thread/list`，按 `recency_at desc` 查询 `cli`、`vscode`、`a
 }
 ```
 
-Device 先调用 `thread/read(includeTurns=false)` 读取元数据，再尝试按 `sortDirection=desc` 分页调用 `thread/items/list`，直到得到最近 200 条用户/助手消息或达到分页上限。当前 Codex Desktop 若返回方法未支持，则兼容回退 `thread/read(includeTurns=true)`；Agent 允许最多 128MB 的本机 app-server 单行响应，但对外仍执行同样的最近 200 条、单条 20000 字符和总正文限制。命令输出、Diff、源码及原始 JSON-RPC 不进入 Domain Payload。该请求要求 `view` 权限，Relay 只转发并按既有短时幂等机制处理，不写入业务数据库。
+Device 先调用 `thread/read(includeTurns=false)` 读取元数据，再按 `sortDirection=desc` 分页调用 `thread/items/list`，并调用 `thread/turns/list(itemsView=summary)` 获取 `startedAt/completedAt/durationMs`。当前 Codex Desktop 若返回方法未支持，则兼容回退 `thread/read(includeTurns=true)`。
+
+历史 Entry 只允许 `user/assistant/tool` 三种受限角色。正文限制为最近 200 条、单条 20000 字符、总正文 200000 字符。`localImage.path` 只能由 Windows Agent 本机读取，转换为最长边 1280px、单图编码约 430KB、单响应附件总 Data URL 600000 字符以内的图片附件；DTO 只包含文件名、MIME 和 Data URL，不包含绝对路径。远程图片 URL 不由 Agent 下载，只有受控 `data:image` 可进入附件。
+
+命令只返回命令摘要和状态，文件变化只返回路径摘要；Shell Output、Diff、源码及原始 JSON-RPC 不进入 Domain Payload。Relay 只实时转发 Markdown、缩略图、时间和摘要，不写入业务数据库。该请求要求 `view` 权限。
 
 新建会话并立即启动真实 Turn：
 
@@ -712,12 +753,16 @@ INTERNAL_ERROR
 - 完整 diff 或项目代码；
 - 完整 Codex 原始 JSON-RPC 历史。
 
-## 21. v1 验证状态
+## 21. v2 验证状态
 
 已自动化验证：
 
 - Windows/.NET 与 Browser Web Crypto ECDSA P1363 互操作；
 - Pairing 并发 Claim 只有一个成功；
+- Claim 只创建 Pending，电脑 Allow/Deny 后才产生最终结果；
+- ViewOnly 禁止 Steer/Interrupt/Approval；
+- Device Ready 前拒绝配对和 Control；
+- Pairing 别名、权限更新和 Device 撤销；
 - Challenge replay、错误 Signature、TTL 和五次 Proof 失败；
 - Control Request ID 幂等、冲突与 Result 关联；
 - Device 断线重连和旧连接 fencing；

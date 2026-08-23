@@ -65,6 +65,14 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
         var auth = (await ReceiveExpectedAsync(RelayMessageTypes.AuthOk, authId, cancellationToken)
             .ConfigureAwait(false)).ReadPayload<AuthOkPayload>();
         _connectionId = auth.ConnectionId;
+        var readyId = RequestId();
+        await SendAsync(RelayEnvelope.Create(
+            RelayMessageTypes.DeviceReady,
+            new { },
+            readyId,
+            DeviceId), cancellationToken).ConfigureAwait(false);
+        _ = await ReceiveExpectedAsync(RelayMessageTypes.DeviceReadyAck, readyId, cancellationToken)
+            .ConfigureAwait(false);
 
         _readerTask = ReaderLoopAsync(_lifetime.Token);
         _heartbeatTask = HeartbeatLoopAsync(_lifetime.Token);
@@ -115,6 +123,20 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
             var envelope = await ReceiveAsync(cancellationToken).ConfigureAwait(false);
             switch (envelope.Type)
             {
+                case RelayMessageTypes.PairingConfirmationRequested:
+                    {
+                        var requested = envelope.ReadPayload<PairingConfirmationRequestedPayload>();
+                        await SendAsync(RelayEnvelope.Create(
+                            RelayMessageTypes.PairingConfirmationResolve,
+                            new PairingConfirmationResolvePayload(
+                                requested.PairingRequestId,
+                                PairingDecision.Allow,
+                                PairingPermissionProfile.Full),
+                            RequestId(),
+                            DeviceId,
+                            requested.ControllerId), cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
                 case RelayMessageTypes.PairingCompleted:
                     await SendInitialStateAsync(cancellationToken).ConfigureAwait(false);
                     break;
@@ -202,13 +224,25 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
                                             "turn-history-system",
                                             "user",
                                             "系统历史用户消息",
-                                            null),
+                                            null,
+                                            [],
+                                            []),
                                         new CodexThreadHistoryEntryPayload(
                                             "item-history-agent",
                                             "turn-history-system",
                                             "assistant",
                                             "系统历史助手回复",
-                                            "final_answer"),
+                                            "final_answer",
+                                            [],
+                                            []),
+                                    ],
+                                    [
+                                        new CodexTurnTimingPayload(
+                                            "turn-history-system",
+                                            "completed",
+                                            DateTimeOffset.UtcNow.AddMinutes(-2).ToUnixTimeSeconds(),
+                                            DateTimeOffset.UtcNow.AddSeconds(-24).ToUnixTimeSeconds(),
+                                            96_000),
                                     ],
                                     false),
                                 RelayJson.Options),

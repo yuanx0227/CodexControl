@@ -27,6 +27,7 @@ public static class RelayApplication
         builder.Services.AddSingleton<ControlRequestTracker>();
         builder.Services.AddSingleton<AuthService>();
         builder.Services.AddSingleton<PairingService>();
+        builder.Services.AddSingleton<PendingPairingConnections>();
         builder.Services.AddSingleton<RelayRouter>();
         builder.Services.AddSingleton<RelayWebSocketHandler>();
         builder.Services.AddHostedService<PresenceMonitor>();

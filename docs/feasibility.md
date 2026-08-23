@@ -21,6 +21,39 @@ Codex Event / Approval
   -> PWA
 ```
 
+### 1.1 2026-08-23 桌面体验与配对 v2 增量
+
+已实现并在当前 Windows 环境验证：
+
+- 同一 `CodexControlAgent.exe` 的 WinForms 托盘、四页设置、GUI/Headless 双模式和每用户单实例；
+- EXE 同目录 `data\` 的设置、last-good、DPAPI 身份、日志、Runtime 缓存和离线撤销队列；
+- Runtime Coordinator、动态 loopback 端口、一键本地 TUI、暂停远程访问和安全重启；
+- 本地二维码、六位码备用、PWA Relay 摘要、Controller 名称、60 秒电脑确认；
+- Pairing v2 Pending、Full/ViewOnly、Pairing Alias、权限更新、Device 撤销和 Ready Gate；
+- EF Migration `PairingApprovalV2`，按用户确认清理旧测试 Pairing；
+- Inno Setup 当前用户安装、两套 .NET 8 Runtime 检测、覆盖升级保留 `data\`、卸载默认删除；
+- 内部/测试安装包 `CodexControl-Setup-UNSIGNED.exe` 和 SHA-256 清单。
+
+当前增量证据：Agent 自动化 11 通过，Relay 自动化 7 通过，Playwright 32 通过，
+真实 Codex 3 通过；本机静默安装、覆盖升级数据保留、Headless 输出和卸载删除通过。
+
+0.5.1 另外验证安全 GFM Markdown、本地图片缩略图与路径脱敏、历史/实时 Turn 耗时、
+默认折叠过程摘要，以及已认证但 Pairing 被清除的 Controller 无需清站点数据即可重新配对。
+
+0.5.2 增加每文件及 Turn 总计的新增/删除行数，并以 WebSocket 增量加活动 Turn 轻量追平解决
+漏事件后必须手工刷新会话的问题；这些是确定性 Agent/PWA 证据，真实移动弱网仍属于现场边界。
+
+0.5.3 进一步验证独立 Agent 为 Idle、但所选 Thread 正由 Codex Desktop 运行的场景：PWA 只读追平
+公共历史，显示运行状态和动态已运行时间；它不证明或实现对 Desktop 所有 Turn 的远程 Steer/停止。
+
+0.5.4 覆盖 PWA 已打开后 Desktop 才启动 Turn 的时序，防止初始时钟早于 `startedAt` 导致永久 Idle。
+
+0.6.0 撤销跨 app-server 状态推断和完整历史轮询：只有 Agent 托管 Thread 使用事件驱动实时状态；
+Desktop 原生 Thread 明确为外部只读。新增滚动锚点、运行/未读/完成未读标志与版本展示验证。
+
+仍未证明：独立 Windows 10 与 Windows 11 干净机矩阵、缺少 Runtime 时真实 UAC 补齐、
+真实手机扫码、正式签名/SmartScreen、生产域名/证书和企业网络。
+
 本机证据不等于生产现场验收。正式上线仍需可信 CA 证书、正式域名、多台实体开发电脑、Android/iOS 实机和企业网络环境测试。
 
 ## 2. 固定基线

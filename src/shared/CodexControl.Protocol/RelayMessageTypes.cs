@@ -13,9 +13,20 @@ public static class RelayMessageTypes
     public const string PairingCreate = "pairing.create";
     public const string PairingCreated = "pairing.created";
     public const string PairingClaim = "pairing.claim";
+    public const string PairingPending = "pairing.pending";
+    public const string PairingConfirmationRequested = "pairing.confirmation.requested";
+    public const string PairingConfirmationResolve = "pairing.confirmation.resolve";
     public const string PairingCompleted = "pairing.completed";
+    public const string PairingDenied = "pairing.denied";
+    public const string PairingList = "pairing.list";
+    public const string PairingListResult = "pairing.list.result";
+    public const string PairingUpdate = "pairing.update";
+    public const string PairingUpdated = "pairing.updated";
+    public const string PairingRevoke = "pairing.revoke";
     public const string PairingRevoked = "pairing.revoked";
 
+    public const string DeviceReady = "device.ready";
+    public const string DeviceReadyAck = "device.ready.ack";
     public const string DeviceOnline = "device.online";
     public const string DeviceOffline = "device.offline";
     public const string DeviceStatus = "device.status";

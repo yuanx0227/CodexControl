@@ -37,6 +37,7 @@ public sealed class PairingEntity
     public bool SteerPermission { get; set; }
     public bool InterruptPermission { get; set; }
     public bool ApprovalPermission { get; set; }
+    public string? Alias { get; set; }
 }
 
 public sealed class PairingSessionEntity
@@ -50,6 +51,20 @@ public sealed class PairingSessionEntity
     public int AttemptCount { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? ConsumedAt { get; set; }
+}
+
+public sealed class PairingRequestEntity
+{
+    public required string Id { get; set; }
+    public required string SessionId { get; set; }
+    public required string DeviceId { get; set; }
+    public required string ControllerId { get; set; }
+    public required string ControllerName { get; set; }
+    public required string PublicKey { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset? ResolvedAt { get; set; }
+    public string? Outcome { get; set; }
 }
 
 public sealed class AuditEventEntity

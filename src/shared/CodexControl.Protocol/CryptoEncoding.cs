@@ -87,13 +87,15 @@ public static class PairingProofCanonicalPayload
     public static string Build(
         string code,
         string controllerId,
+        string controllerName,
         string publicKey,
         string proofNonce) =>
         string.Join(
             '\n',
-            "codex-control-pairing-proof-v1",
+            "codex-control-pairing-proof-v2",
             code,
             controllerId,
+            controllerName,
             publicKey,
             proofNonce);
 }

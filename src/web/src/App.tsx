@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import packageJson from '../package.json';
 import type {
   ApprovalRequested,
   CodexEvent,
   CodexProjectSummary,
   CodexSnapshot,
   CodexThreadReadResult,
+  CodexThreadHistoryAttachment,
+  CodexThreadHistoryFileChange,
   CodexThreadSummary,
   DeviceSummary,
 } from './protocol';
@@ -21,8 +26,12 @@ const initialState: RelayClientState = {
 
 export function App() {
   const client = useMemo(() => new RelayClient(), []);
+  const [pairingLink, setPairingLink] = useState<PairingLink | undefined>(() => readPairingLink());
+  const [linkedCode, setLinkedCode] = useState('');
   const [state, setState] = useState(initialState);
-  const [selectedId, setSelectedId] = useState<string>();
+  const [selectedId, setSelectedId] = useState<string | undefined>(() =>
+    localStorage.getItem('codex-control-last-device') ?? undefined,
+  );
   const [showPairing, setShowPairing] = useState(false);
   const [toast, setToast] = useState<string>();
   const toastTimer = useRef<number | undefined>(undefined);
@@ -38,12 +47,15 @@ export function App() {
 
   useEffect(() => {
     const unsubscribe = client.subscribe(setState);
-    void client.start();
     return () => {
       unsubscribe();
       client.stop();
     };
   }, [client]);
+
+  useEffect(() => {
+    if (!pairingLink) void client.start();
+  }, [client, pairingLink]);
 
   useEffect(() => () => {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
@@ -53,12 +65,14 @@ export function App() {
   if (selected) {
     return (
       <DeviceWorkspace
+        key={selected.deviceId}
         client={client}
         device={selected}
         events={state.events[selected.deviceId] ?? []}
         approvals={state.approvals[selected.deviceId] ?? []}
         connection={state.connection}
         authenticated={state.authenticated}
+        relayVersion={state.relayVersion}
         onBack={() => setSelectedId(undefined)}
         onApprove={async (approvalId, decision) => {
           await client.approve(selected.deviceId, approvalId, decision);
@@ -73,6 +87,7 @@ export function App() {
         onRevoke={async () => {
           await client.revoke(selected.deviceId);
           setSelectedId(undefined);
+          localStorage.removeItem('codex-control-last-device');
           showToast('已解除配对');
         }}
         onNotify={showToast}
@@ -81,18 +96,27 @@ export function App() {
     );
   }
 
-  const needsPairing = showPairing || state.devices.length === 0;
+  const needsPairing = Boolean(pairingLink) || showPairing || state.devices.length === 0;
   return (
     <main className="landing-shell">
-      <LandingHeader connection={state.connection} />
+      <LandingHeader connection={state.connection} relayVersion={state.relayVersion} />
       {needsPairing ? (
         <PairingPanel
           connection={state.connection}
           error={state.lastError}
+          pending={state.pairingPending}
+          pairingLink={pairingLink}
+          initialCode={linkedCode}
+          onConfirmLink={(link) => {
+            saveRelayUrl(controllerWebSocketUrl(link.relayRoot));
+            window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+            setLinkedCode(link.code);
+            setPairingLink(undefined);
+          }}
           hasDevices={state.devices.length > 0}
           onCancel={() => setShowPairing(false)}
-          onPair={async (code) => {
-            await client.pair(code);
+          onPair={async (code, controllerName) => {
+            await client.pair(code, controllerName);
             setShowPairing(false);
             showToast('配对成功');
           }}
@@ -109,7 +133,14 @@ export function App() {
           </div>
           <div className="device-list">
             {state.devices.map((device) => (
-              <DeviceRow key={device.deviceId} device={device} onOpen={() => setSelectedId(device.deviceId)} />
+              <DeviceRow
+                key={device.deviceId}
+                device={device}
+                onOpen={() => {
+                  localStorage.setItem('codex-control-last-device', device.deviceId);
+                  setSelectedId(device.deviceId);
+                }}
+              />
             ))}
           </div>
           {toast && <div key={toast} className="toast">{toast}</div>}
@@ -119,11 +150,20 @@ export function App() {
   );
 }
 
-function LandingHeader({ connection }: { connection: RelayClientState['connection'] }) {
+function LandingHeader({
+  connection,
+  relayVersion,
+}: {
+  connection: RelayClientState['connection'];
+  relayVersion?: string;
+}) {
   return (
     <header className="landing-header">
       <Brand />
-      <ConnectionState connection={connection} />
+      <div className="landing-meta">
+        <ConnectionState connection={connection} />
+        <small>Web v{packageJson.version} · Relay v{relayVersion ?? '未知'} · Protocol v2</small>
+      </div>
     </header>
   );
 }
@@ -145,27 +185,40 @@ function ConnectionState({ connection }: { connection: RelayClientState['connect
 function PairingPanel({
   connection,
   error,
+  pending,
+  pairingLink,
+  initialCode,
+  onConfirmLink,
   hasDevices,
   onCancel,
   onPair,
 }: {
   connection: RelayClientState['connection'];
   error?: string;
+  pending?: string;
+  pairingLink?: PairingLink;
+  initialCode: string;
+  onConfirmLink: (link: PairingLink) => void;
   hasDevices: boolean;
   onCancel: () => void;
-  onPair: (code: string) => Promise<void>;
+  onPair: (code: string, controllerName: string) => Promise<void>;
 }) {
-  const [code, setCode] = useState('');
+  const [code, setCode] = useState(initialCode);
+  const [controllerName, setControllerName] = useState(() => browserControllerName());
   const [relayUrl, setRelayUrl] = useState(loadRelayUrl());
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string>();
+
+  useEffect(() => {
+    if (initialCode) setCode(initialCode);
+  }, [initialCode]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setSubmitting(true);
     setMessage(undefined);
     try {
-      await onPair(code);
+      await onPair(code, controllerName);
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -178,8 +231,17 @@ function PairingPanel({
       <div className="pairing-panel">
         <span className="pairing-icon">↔</span>
         <h1>连接你的电脑</h1>
-        <p>在电脑上运行 Agent 的 <code>--pair</code>，输入三分钟内有效的六位码。</p>
-        <form onSubmit={submit}>
+        {pairingLink && (
+          <section className="pairing-link-summary">
+            <p>将连接 Relay：<strong>{new URL(pairingLink.relayRoot).host}</strong></p>
+            <p>电脑：<strong>{pairingLink.deviceName ?? '二维码中的电脑'}</strong></p>
+            <button className="solid-button full-button" onClick={() => onConfirmLink(pairingLink)}>
+              确认 Relay 并继续
+            </button>
+          </section>
+        )}
+        <p>扫描电脑设置页二维码，或输入三分钟内有效的六位码。</p>
+        {!pairingLink && <form onSubmit={submit}>
           <label htmlFor="pairing-code">六位配对码</label>
           <input
             id="pairing-code"
@@ -192,10 +254,17 @@ function PairingPanel({
             onChange={(event) => setCode(event.target.value.replaceAll(/\D/gu, '').slice(0, 6))}
             autoFocus
           />
+          <label htmlFor="controller-name">控制端名称</label>
+          <input
+            id="controller-name"
+            maxLength={200}
+            value={controllerName}
+            onChange={(event) => setControllerName(event.target.value)}
+          />
           <button className="solid-button full-button" disabled={code.length !== 6 || submitting || connection === 'offline'}>
             {submitting ? '正在配对…' : '配对'}
           </button>
-        </form>
+        </form>}
         <details className="relay-settings">
           <summary>Relay 设置</summary>
           <label htmlFor="relay-url">WebSocket 地址</label>
@@ -213,6 +282,7 @@ function PairingPanel({
             </button>
           </div>
         </details>
+        {pending && <p role="status" className="inline-status">{pending}</p>}
         {(message || error) && <p role="alert" className="inline-error">{message ?? error}</p>}
         {hasDevices && <button className="link-button" onClick={onCancel}>返回设备列表</button>}
       </div>
@@ -221,25 +291,78 @@ function PairingPanel({
 }
 
 function DeviceRow({ device, onOpen }: { device: DeviceSummary; onOpen: () => void }) {
+  const managedRunning = Boolean(device.snapshot?.activeThreadId && device.snapshot.activeTurnId);
   return (
     <button className="device-row" onClick={onOpen} aria-label={`打开 ${device.name}`}>
       <span className="device-avatar">{device.name.slice(0, 1).toUpperCase()}</span>
       <span className="device-copy">
         <strong>{device.name}</strong>
-        <small>{device.snapshot?.currentProject ?? (device.online ? '尚无活动项目' : '设备离线')}</small>
+        <small>{device.online
+          ? managedRunning
+            ? device.snapshot?.currentProject ?? 'Agent 托管任务运行中'
+            : 'Agent 当前未托管任务'
+          : '设备离线'}</small>
       </span>
-      <StatusPill online={device.online} status={device.snapshot?.status} />
+      <StatusPill
+        online={device.online}
+        status={managedRunning ? device.snapshot?.status : 'Idle'}
+        label={managedRunning ? 'Agent 运行中' : device.online ? 'Agent 空闲' : undefined}
+      />
       <span className="row-chevron">›</span>
+    </button>
+  );
+}
+
+function ConversationLink({
+  thread,
+  active,
+  activity,
+  readAt,
+  className,
+  title,
+  onClick,
+}: {
+  thread: CodexThreadSummary;
+  active: boolean;
+  activity?: ThreadActivityState;
+  readAt?: number;
+  className: string;
+  title: string;
+  onClick: () => void;
+}) {
+  const unread = Boolean(activity && activity.latestAt > (readAt ?? 0));
+  return (
+    <button
+      className={`conversation-link ${className} ${active ? 'active' : ''}`}
+      title={title}
+      onClick={onClick}
+    >
+      <span className="conversation-link-title">{thread.name ?? thread.preview ?? '未命名会话'}</span>
+      {activity?.status === 'running' ? (
+        <span className="thread-indicator running" title="任务运行中" aria-label="任务运行中" />
+      ) : unread && activity?.status === 'completed' ? (
+        <span className="thread-indicator completed-unread" title="任务已完成，尚未阅读" aria-label="完成未读">✓</span>
+      ) : unread && activity?.status === 'failed' ? (
+        <span className="thread-indicator failed-unread" title="任务失败，尚未阅读" aria-label="失败未读">!</span>
+      ) : unread ? (
+        <span className="thread-indicator unread" title="有未读更新" aria-label="未读更新" />
+      ) : null}
     </button>
   );
 }
 
 interface ChatEntry {
   id: string;
-  role: 'user' | 'assistant' | 'tool' | 'system';
+  role: 'user' | 'assistant' | 'tool' | 'system' | 'summary';
   text: string;
   meta?: string;
   streaming?: boolean;
+  turnId?: string;
+  occurredAt?: number;
+  durationMs?: number;
+  attachments?: CodexThreadHistoryAttachment[];
+  processItems?: ChatEntry[];
+  changes?: CodexThreadHistoryFileChange[];
 }
 
 interface ProjectNavigationGroup {
@@ -255,6 +378,13 @@ interface ThreadNavigation {
   recent: CodexThreadSummary[];
 }
 
+type ThreadActivityStatus = 'running' | 'completed' | 'failed' | 'updated';
+
+interface ThreadActivityState {
+  latestAt: number;
+  status: ThreadActivityStatus;
+}
+
 function DeviceWorkspace({
   client,
   device,
@@ -262,6 +392,7 @@ function DeviceWorkspace({
   approvals,
   connection,
   authenticated,
+  relayVersion,
   onBack,
   onApprove,
   onInterrupt,
@@ -275,6 +406,7 @@ function DeviceWorkspace({
   approvals: ApprovalRequested[];
   connection: RelayClientState['connection'];
   authenticated: boolean;
+  relayVersion?: string;
   onBack: () => void;
   onApprove: (approvalId: string, decision: unknown) => Promise<void>;
   onInterrupt: () => Promise<void>;
@@ -298,9 +430,23 @@ function DeviceWorkspace({
   const [error, setError] = useState<string>();
   const [interrupting, setInterrupting] = useState(false);
   const [localEntries, setLocalEntries] = useState<ChatEntry[]>([]);
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  const [threadActivities, setThreadActivities] = useState<Record<string, ThreadActivityState>>(() =>
+    loadThreadActivities(device.deviceId),
+  );
+  const [readReceipts, setReadReceipts] = useState<Record<string, number>>(() =>
+    loadThreadReadReceipts(device.deviceId),
+  );
+  const [newMessageCount, setNewMessageCount] = useState(0);
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const threadHistoryRequest = useRef(0);
   const chatFeed = useRef<HTMLElement>(null);
   const stickChatToBottom = useRef(true);
+  const initialScrollThread = useRef<string | undefined>(undefined);
+  const previousTailSignature = useRef<string | undefined>(undefined);
+  const previousSelectedEventCount = useRef(0);
+  const preservedScrollTop = useRef(0);
+  const userScrolling = useRef(false);
   const lastRefreshedCompletion = useRef<string | undefined>(undefined);
   const snapshot = device.snapshot;
   const workspaceConnection = authenticated
@@ -344,6 +490,13 @@ function DeviceWorkspace({
     }
   }, [client, device.deviceId]);
 
+  const markThreadRead = useCallback((threadId: string, readAt?: number) => {
+    if (!readAt) return;
+    setReadReceipts((current) => current[threadId] !== undefined && current[threadId] >= readAt
+      ? current
+      : { ...current, [threadId]: readAt });
+  }, []);
+
   useEffect(() => {
     if (!authenticated || !device.online) {
       setHistoryLoading(false);
@@ -378,6 +531,7 @@ function DeviceWorkspace({
       return;
     }
 
+    initialScrollThread.current = selectedThreadId;
     setThreadHistory(undefined);
     void loadThread(selectedThreadId);
   }, [authenticated, device.online, loadThread, newSession, selectedThreadId]);
@@ -385,6 +539,54 @@ function DeviceWorkspace({
   useEffect(() => {
     if (snapshot?.status === 'Interrupted') setInterrupting(false);
   }, [snapshot?.status]);
+
+  useEffect(() => {
+    setThreadActivities((current) => {
+      let next = current;
+      const seen = new Set<string>();
+      for (const event of events) {
+        if (!event.threadId || seen.has(event.threadId)) continue;
+        seen.add(event.threadId);
+        const existing = next[event.threadId];
+        if (existing && existing.latestAt > event.occurredAt) continue;
+        const status = event.kind === 'TurnStarted'
+          ? 'running'
+          : event.kind === 'TurnCompleted'
+            ? readEventStatus(event) === 'failed' ? 'failed' : 'completed'
+            : event.kind === 'ErrorOccurred'
+              ? 'failed'
+              : existing?.status === 'running' ? 'running' : 'updated';
+        if (next === current) next = { ...current };
+        next[event.threadId] = { latestAt: event.occurredAt, status };
+      }
+      return next;
+    });
+  }, [events]);
+
+  useEffect(() => {
+    if (!snapshot?.activeThreadId) return;
+    const status: ThreadActivityStatus = snapshot.activeTurnId
+      ? 'running'
+      : snapshot.status === 'Failed'
+        ? 'failed'
+        : snapshot.status === 'Completed' || snapshot.status === 'Interrupted'
+          ? 'completed'
+          : 'updated';
+    setThreadActivities((current) => {
+      const existing = current[snapshot.activeThreadId!];
+      if (existing && existing.latestAt >= snapshot.lastActivityAt && existing.status === status) return current;
+      return {
+        ...current,
+        [snapshot.activeThreadId!]: {
+          latestAt: Math.max(existing?.latestAt ?? 0, snapshot.lastActivityAt),
+          status,
+        },
+      };
+    });
+  }, [snapshot?.activeThreadId, snapshot?.activeTurnId, snapshot?.lastActivityAt, snapshot?.status]);
+
+  useEffect(() => saveThreadActivities(device.deviceId, threadActivities), [device.deviceId, threadActivities]);
+  useEffect(() => saveThreadReadReceipts(device.deviceId, readReceipts), [device.deviceId, readReceipts]);
 
   const navigation = useMemo(() => buildThreadNavigation(threads, projects), [projects, threads]);
   const selectedThread = threads.find((thread) => thread.threadId === selectedThreadId);
@@ -413,7 +615,22 @@ function DeviceWorkspace({
   }, [navigation.projects, selectedThread]);
 
   const hasActiveTurn = Boolean(snapshot?.activeThreadId && snapshot.activeTurnId);
+  const taskRunning = hasActiveTurn;
+  const externalSession = Boolean(
+    selectedThreadId && selectedThreadId !== snapshot?.activeThreadId && !newSession,
+  );
+  const runningStartedAt = readTimestamp(snapshot?.startedAt);
+  const runningElapsedMs = taskRunning && runningStartedAt !== undefined
+    ? Math.max(0, clockNow - runningStartedAt)
+    : undefined;
   const conversationId = snapshot?.activeThreadId ?? selectedThreadId;
+
+  useEffect(() => {
+    if (!taskRunning) return;
+    setClockNow(Date.now());
+    const timer = window.setInterval(() => setClockNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [taskRunning, runningStartedAt]);
   const eventEntries = useMemo(
     () => buildChatEntries(
       events,
@@ -422,17 +639,37 @@ function DeviceWorkspace({
     ),
     [conversationId, events, snapshot],
   );
-  const historicalEntries = useMemo<ChatEntry[]>(() => threadHistory?.entries.map((entry) => ({
-    id: `history_${entry.itemId}`,
-    role: entry.role,
-    text: entry.text,
-    meta: entry.phase === 'commentary' ? '过程更新' : undefined,
-  })) ?? [], [threadHistory]);
+  const historicalEntries = useMemo<ChatEntry[]>(() => {
+    if (!threadHistory) return [];
+    const timings = new Map(threadHistory.turns.map((turn) => [turn.turnId, turn]));
+    return threadHistory.entries.map((entry) => {
+      const timing = timings.get(entry.turnId);
+      return {
+        id: `history_${entry.itemId}`,
+        role: entry.role,
+        text: entry.text,
+        turnId: entry.turnId,
+        durationMs: resolveDurationMs(timing),
+        attachments: entry.attachments,
+        changes: entry.changes,
+        meta: entry.phase === 'commentary'
+          ? '过程更新'
+          : entry.role === 'tool'
+            ? processLabel(entry.phase)
+            : undefined,
+      };
+    });
+  }, [threadHistory]);
   const chatEntries = useMemo(
-    () => mergeChatEntries(historicalEntries, localEntries, eventEntries),
+    () => foldProcessEntries(mergeChatEntries(historicalEntries, localEntries, eventEntries)),
     [eventEntries, historicalEntries, localEntries],
   );
   const tailEntry = chatEntries.at(-1);
+  const tailSignature = tailEntry ? `${tailEntry.id}\u0000${tailEntry.text}` : undefined;
+  const selectedActivity = selectedThreadId ? threadActivities[selectedThreadId] : undefined;
+  const selectedEventCount = selectedThreadId
+    ? events.filter((event) => event.threadId === selectedThreadId).length
+    : 0;
   const completedEvent = events.find((event) =>
     event.kind === 'TurnCompleted' &&
     selectedThreadId &&
@@ -440,23 +677,73 @@ function DeviceWorkspace({
   );
 
   useEffect(() => {
-    if (!threadHistory || threadHistory.threadId !== selectedThreadId) return;
+    if (!threadHistory || threadHistory.threadId !== selectedThreadId ||
+        initialScrollThread.current !== selectedThreadId) return;
+    initialScrollThread.current = undefined;
     const frame = window.requestAnimationFrame(() => {
       if (chatFeed.current) {
         chatFeed.current.scrollTop = chatFeed.current.scrollHeight;
+        preservedScrollTop.current = chatFeed.current.scrollTop;
         stickChatToBottom.current = true;
+        setIsAtBottom(true);
+        setNewMessageCount(0);
+        markThreadRead(selectedThreadId, selectedActivity?.latestAt);
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [selectedThreadId, threadHistory]);
+  }, [markThreadRead, selectedThreadId, threadHistory?.threadId]);
 
-  useEffect(() => {
-    if (!tailEntry || !stickChatToBottom.current) return;
+  useLayoutEffect(() => {
+    if (!tailSignature) return;
+    const previous = previousTailSignature.current;
+    previousTailSignature.current = tailSignature;
+    if (!previous || previous === tailSignature) return;
     const frame = window.requestAnimationFrame(() => {
-      if (chatFeed.current) chatFeed.current.scrollTop = chatFeed.current.scrollHeight;
+      if (!chatFeed.current) return;
+      if (stickChatToBottom.current) {
+        chatFeed.current.scrollTop = chatFeed.current.scrollHeight;
+        preservedScrollTop.current = chatFeed.current.scrollTop;
+        setNewMessageCount(0);
+        if (selectedThreadId) markThreadRead(selectedThreadId, selectedActivity?.latestAt);
+      } else {
+        chatFeed.current.scrollTop = preservedScrollTop.current;
+      }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [tailEntry?.id, tailEntry?.text]);
+  }, [markThreadRead, selectedActivity?.latestAt, selectedThreadId, tailSignature]);
+
+  useEffect(() => {
+    const previous = previousSelectedEventCount.current;
+    previousSelectedEventCount.current = selectedEventCount;
+    if (isAtBottom) {
+      setNewMessageCount(0);
+      return;
+    }
+    if (selectedEventCount > previous) {
+      setNewMessageCount((count) => count + selectedEventCount - previous);
+    }
+  }, [isAtBottom, selectedEventCount]);
+
+  useLayoutEffect(() => {
+    if (isAtBottom || !chatFeed.current) return;
+    const feed = chatFeed.current;
+    const scrollTop = preservedScrollTop.current;
+    const restore = () => {
+      if (!stickChatToBottom.current) feed.scrollTop = scrollTop;
+    };
+    restore();
+    const frame = window.requestAnimationFrame(restore);
+    const timer = window.setTimeout(restore, 50);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [isAtBottom, selectedEventCount]);
+
+  useEffect(() => {
+    if (!selectedThreadId || !selectedActivity || !isAtBottom) return;
+    markThreadRead(selectedThreadId, selectedActivity.latestAt);
+  }, [isAtBottom, markThreadRead, selectedActivity, selectedThreadId]);
 
   useEffect(() => {
     if (!completedEvent || !selectedThreadId || lastRefreshedCompletion.current === completedEvent.eventId) return;
@@ -479,6 +766,12 @@ function DeviceWorkspace({
     }
     setSelectedThreadId(threadId);
     stickChatToBottom.current = true;
+    setIsAtBottom(true);
+    initialScrollThread.current = threadId;
+    previousTailSignature.current = undefined;
+    previousSelectedEventCount.current = 0;
+    preservedScrollTop.current = 0;
+    setNewMessageCount(0);
     setNewSession(false);
     setSidebarOpen(false);
     setLocalEntries([]);
@@ -490,6 +783,12 @@ function DeviceWorkspace({
     threadHistoryRequest.current += 1;
     setSelectedThreadId(undefined);
     stickChatToBottom.current = true;
+    setIsAtBottom(true);
+    initialScrollThread.current = undefined;
+    previousTailSignature.current = undefined;
+    previousSelectedEventCount.current = 0;
+    preservedScrollTop.current = 0;
+    setNewMessageCount(0);
     setNewSession(true);
     setSidebarOpen(false);
     setLocalEntries([]);
@@ -541,7 +840,7 @@ function DeviceWorkspace({
     }
   }
 
-  const title = hasActiveTurn
+  const title = taskRunning
     ? selectedThread?.name ?? threadHistory?.name ?? selectedThread?.preview ?? '当前任务'
     : newSession
       ? newCwd.trim()
@@ -550,16 +849,22 @@ function DeviceWorkspace({
       : selectedThread?.name ?? threadHistory?.name ?? selectedThread?.preview ?? 'Codex';
   const composerLabel = hasActiveTurn
     ? 'Steer 当前任务'
+    : externalSession
+      ? '恢复 Desktop 外部会话'
     : selectedThread
       ? '继续历史会话的任务'
       : '第一条任务';
   const composerPlaceholder = hasActiveTurn
     ? '不要修改数据库结构，只调整业务层。'
+    : externalSession
+      ? '恢复后将由 Codex Control Agent 托管并实时同步…'
     : selectedThread
       ? '继续这个会话…'
       : '给电脑上的 Codex 发送任务…';
   const sendLabel = hasActiveTurn
     ? '发送 Steer'
+    : externalSession
+      ? '恢复并由 Agent 托管'
     : selectedThread
       ? '恢复会话并发送'
       : '创建会话并开始';
@@ -573,8 +878,8 @@ function DeviceWorkspace({
         </div>
         <button
           className="new-chat-button"
-          disabled={hasActiveTurn}
-          title={hasActiveTurn ? '请先停止当前任务' : '新建任务'}
+          disabled={taskRunning}
+          title={taskRunning ? '请先等待当前任务完成' : '新建任务'}
           onClick={() => beginNewSession()}
         >
           <span>＋</span> 新建任务
@@ -612,7 +917,7 @@ function DeviceWorkspace({
                           className="project-new-button"
                           aria-label={`在 ${group.name} 中新建会话`}
                           title={`在 ${group.name} 中新建会话`}
-                          disabled={hasActiveTurn}
+                          disabled={taskRunning}
                           onClick={() => beginNewSession(group.cwd)}
                         >＋</button>
                       )}
@@ -620,14 +925,16 @@ function DeviceWorkspace({
                     {expanded && group.threads.length > 0 && (
                       <div className="project-thread-list" id={regionId}>
                         {group.threads.map((thread) => (
-                          <button
+                          <ConversationLink
                             key={thread.threadId}
-                            className={`conversation-link project-thread-link ${selectedThreadId === thread.threadId && !newSession ? 'active' : ''}`}
+                            thread={thread}
+                            active={selectedThreadId === thread.threadId && !newSession}
+                            activity={threadActivities[thread.threadId]}
+                            readAt={readReceipts[thread.threadId]}
+                            className="project-thread-link"
                             title={formatThreadTime(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt)}
                             onClick={() => selectThread(thread.threadId)}
-                          >
-                            <span>{thread.name ?? thread.preview ?? '未命名会话'}</span>
-                          </button>
+                          />
                         ))}
                       </div>
                     )}
@@ -638,14 +945,16 @@ function DeviceWorkspace({
                 <div className="sidebar-label recent-label"><span>最近</span></div>
               )}
               {navigation.recent.map((thread) => (
-                <button
+                <ConversationLink
                   key={thread.threadId}
-                  className={`conversation-link recent-thread-link ${selectedThreadId === thread.threadId && !newSession ? 'active' : ''}`}
+                  thread={thread}
+                  active={selectedThreadId === thread.threadId && !newSession}
+                  activity={threadActivities[thread.threadId]}
+                  readAt={readReceipts[thread.threadId]}
+                  className="recent-thread-link"
                   title={`${thread.cwd ?? '无项目'} · ${formatThreadTime(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt)}`}
                   onClick={() => selectThread(thread.threadId)}
-                >
-                  <span>{thread.name ?? thread.preview ?? '未命名会话'}</span>
-                </button>
+                />
               ))}
             </>
           )}
@@ -653,7 +962,14 @@ function DeviceWorkspace({
         <div className="sidebar-footer">
           <div className="sidebar-device">
             <span className="device-avatar small">{device.name.slice(0, 1).toUpperCase()}</span>
-            <span><strong>{device.name}</strong><small><ConnectionState connection={workspaceConnection} /></small></span>
+            <span>
+              <strong>{device.name}</strong>
+              <small><ConnectionState connection={workspaceConnection} /></small>
+              <small className="version-line">Agent v{snapshot?.agentVersion ?? '未知'}</small>
+            </span>
+          </div>
+          <div className="sidebar-version">
+            Web v{packageJson.version} · Relay v{relayVersion ?? '未知'} · Protocol v2
           </div>
           <button className="sidebar-action" onClick={() => void refreshThreads()}>刷新会话</button>
           <button className="sidebar-action danger" onClick={() => void onRevoke()}>解除配对</button>
@@ -668,9 +984,14 @@ function DeviceWorkspace({
             <strong>{title}</strong>
             <span>{newSession
               ? newCwd.trim() || '选择电脑上的项目目录'
-              : selectedThread?.cwd ?? threadHistory?.cwd ?? snapshot?.currentProject ?? device.name}</span>
+              : `${selectedThread?.cwd ?? threadHistory?.cwd ?? snapshot?.currentProject ?? device.name}` +
+                (externalSession ? ' · Desktop 外部会话（状态不可订阅）' : '')}</span>
           </div>
-          <StatusPill online={device.online} status={interrupting ? 'Interrupting' : snapshot?.status} />
+          <StatusPill
+            online={device.online}
+            status={interrupting ? 'Interrupting' : taskRunning ? 'Running' : 'Idle'}
+            label={taskRunning ? '任务正在运行' : externalSession ? 'Desktop 外部会话' : 'Agent 就绪'}
+          />
           <button
             className="stop-button"
             disabled={busy || !hasActiveTurn}
@@ -687,11 +1008,16 @@ function DeviceWorkspace({
           </button>
         </header>
 
-        {(snapshot?.currentActivity || snapshot?.runningCommand) && (
+        {(taskRunning || snapshot?.currentActivity || snapshot?.runningCommand) && (
           <div className="runtime-strip">
             <span className="pulse-dot" />
-            <span>{snapshot.currentActivity ?? '运行中'}</span>
-            {snapshot.runningCommand && <code>{snapshot.runningCommand}</code>}
+            <span>{taskRunning
+              ? hasActiveTurn ? snapshot?.currentActivity ?? '任务正在运行' : '任务正在运行'
+              : snapshot?.currentActivity}</span>
+            {snapshot?.runningCommand && <code>{snapshot.runningCommand}</code>}
+            {runningElapsedMs !== undefined && (
+              <strong className="runtime-elapsed">已运行 {formatDuration(runningElapsedMs)}</strong>
+            )}
           </div>
         )}
 
@@ -699,9 +1025,37 @@ function DeviceWorkspace({
           className="chat-feed"
           aria-label="会话内容"
           ref={chatFeed}
+          onWheel={(event) => {
+            if (event.deltaY < 0) {
+              userScrolling.current = true;
+              stickChatToBottom.current = false;
+              setIsAtBottom(false);
+              preservedScrollTop.current = event.currentTarget.scrollTop;
+              window.setTimeout(() => { userScrolling.current = false; }, 80);
+            }
+          }}
+          onPointerDown={() => { userScrolling.current = true; }}
+          onPointerUp={() => { window.setTimeout(() => { userScrolling.current = false; }, 100); }}
+          onPointerCancel={() => { userScrolling.current = false; }}
+          onTouchStart={() => { userScrolling.current = true; }}
+          onTouchEnd={() => { window.setTimeout(() => { userScrolling.current = false; }, 100); }}
           onScroll={(event) => {
             const target = event.currentTarget;
-            stickChatToBottom.current = target.scrollHeight - target.scrollTop - target.clientHeight < 96;
+            if (!userScrolling.current) {
+              if (!stickChatToBottom.current &&
+                  Math.abs(target.scrollTop - preservedScrollTop.current) > 1) {
+                target.scrollTop = preservedScrollTop.current;
+              }
+              return;
+            }
+            if (userScrolling.current) preservedScrollTop.current = target.scrollTop;
+            const atBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 96;
+            stickChatToBottom.current = atBottom;
+            setIsAtBottom(atBottom);
+            if (atBottom) {
+              setNewMessageCount(0);
+              if (selectedThreadId) markThreadRead(selectedThreadId, selectedActivity?.latestAt);
+            }
           }}
         >
           {!device.online && selectedThreadId && !newSession ? (
@@ -760,8 +1114,24 @@ function DeviceWorkspace({
           {error && <p role="alert" className="chat-error">{error}</p>}
         </section>
 
+        {newMessageCount > 0 && (
+          <button
+            className="new-messages-button"
+            onClick={() => {
+              if (chatFeed.current) chatFeed.current.scrollTop = chatFeed.current.scrollHeight;
+              if (chatFeed.current) preservedScrollTop.current = chatFeed.current.scrollTop;
+              stickChatToBottom.current = true;
+              setIsAtBottom(true);
+              setNewMessageCount(0);
+              if (selectedThreadId) markThreadRead(selectedThreadId, selectedActivity?.latestAt);
+            }}
+          >
+            ↓ {newMessageCount} 条新消息
+          </button>
+        )}
+
         <div className="composer-dock">
-          {!hasActiveTurn && !selectedThread && (
+          {!taskRunning && !selectedThread && (
             <div className="project-picker">
               <span>⌂</span>
               <label className="sr-only" htmlFor="new-session-cwd">电脑上的项目目录</label>
@@ -790,7 +1160,7 @@ function DeviceWorkspace({
               rows={1}
             />
             <div className="composer-footer">
-              <span>{hasActiveTurn ? 'Steer 当前 Turn' : selectedThread ? '恢复历史会话' : '创建新会话'}</span>
+              <span>{hasActiveTurn ? 'Steer 当前 Turn' : externalSession ? '恢复后切换为 Agent 托管' : selectedThread ? '恢复历史会话' : '创建新会话'}</span>
               <button
                 className="send-button"
                 aria-label={sendLabel}
@@ -810,29 +1180,99 @@ function DeviceWorkspace({
 }
 
 function ChatMessage({ entry }: { entry: ChatEntry }) {
+  if (entry.role === 'summary') {
+    const impact = summarizeFileImpact(entry.changes ?? []);
+    return (
+      <details className="process-summary">
+        <summary>
+          <span>过程摘要</span>
+          {impact && <small className="file-impact-total">{impact}</small>}
+          {entry.durationMs !== undefined && <small>耗时 {formatDuration(entry.durationMs)}</small>}
+        </summary>
+        <div className="process-summary-items">
+          {(entry.processItems ?? []).map((item) => (
+            <div className="process-summary-item" key={item.id}>
+              <strong>{item.meta ?? '电脑操作'}</strong>
+              <code>{item.text}</code>
+            </div>
+          ))}
+        </div>
+      </details>
+    );
+  }
   if (entry.role === 'system') {
     return <div className="system-message"><span>{entry.text}</span></div>;
   }
   if (entry.role === 'tool') {
     return <div className="tool-message"><span>›_</span><div><strong>{entry.meta ?? '电脑操作'}</strong><p>{entry.text}</p></div></div>;
   }
+  const prompt = entry.role === 'user' ? splitUserPrompt(entry.text) : undefined;
   return (
     <article className={`chat-message ${entry.role} ${entry.streaming ? 'streaming' : ''}`}>
       {entry.role === 'assistant' && <span className="assistant-avatar">C</span>}
       <div>
         {entry.meta && <small>{entry.meta}</small>}
-        <p><TypewriterText text={entry.text} active={Boolean(entry.streaming)} /></p>
+        <MarkdownBody text={prompt?.request ?? entry.text} />
+        {entry.streaming && <span className="typing-caret" aria-hidden="true" />}
+        <ImageAttachments attachments={entry.attachments ?? []} />
+        {prompt?.context && (
+          <details className="prompt-context">
+            <summary>附件与上下文</summary>
+            <MarkdownBody text={prompt.context} />
+          </details>
+        )}
+        {entry.durationMs !== undefined && (
+          <small className="message-duration">耗时 {formatDuration(entry.durationMs)}</small>
+        )}
       </div>
     </article>
   );
 }
 
-function TypewriterText({ text, active }: { text: string; active: boolean }) {
+function MarkdownBody({ text }: { text: string }) {
   return (
-    <>
-      {text}
-      {active && <span className="typing-caret" aria-hidden="true" />}
-    </>
+    <div className="markdown-body">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        skipHtml
+        components={{
+          a: ({ href, children }) => (
+            <a href={href} target="_blank" rel="noreferrer">{children}</a>
+          ),
+          img: ({ src, alt }) => typeof src === 'string' &&
+            (src.startsWith('data:image/') || src.startsWith('/'))
+            ? <img src={src} alt={alt ?? '图片'} loading="lazy" />
+            : <span className="blocked-markdown-image">[图片：{alt ?? '外部地址'}]</span>,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function ImageAttachments({ attachments }: { attachments: CodexThreadHistoryAttachment[] }) {
+  const images = attachments.filter((attachment) =>
+    attachment.kind === 'image' &&
+    attachment.dataUrl.startsWith(`data:${attachment.mimeType};base64,`) &&
+    attachment.mimeType.startsWith('image/'),
+  );
+  if (images.length === 0) return null;
+  return (
+    <div className="message-attachments">
+      {images.map((attachment, index) => (
+        <a
+          href={attachment.dataUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="message-image-link"
+          key={`${attachment.name}-${index}`}
+        >
+          <img src={attachment.dataUrl} alt={attachment.name} loading="lazy" />
+          <small>{attachment.name}</small>
+        </a>
+      ))}
+    </div>
   );
 }
 
@@ -870,9 +1310,9 @@ function ApprovalCard({
   );
 }
 
-function StatusPill({ online, status }: { online: boolean; status?: string }) {
+function StatusPill({ online, status, label }: { online: boolean; status?: string; label?: string }) {
   const value = online ? status ?? 'Idle' : 'Offline';
-  return <span className={`status-pill ${statusClass(value)}`}><i />{value}</span>;
+  return <span className={`status-pill ${statusClass(value)}`}><i />{online ? label ?? value : 'Offline'}</span>;
 }
 
 function statusClass(status: string) {
@@ -991,32 +1431,88 @@ function mergeChatEntries(...groups: ChatEntry[][]): ChatEntry[] {
 }
 
 function buildChatEntries(events: CodexEvent[], snapshot: CodexSnapshot | undefined, threadId?: string): ChatEntry[] {
+  const chronological = [...events].reverse().filter((event) =>
+    !threadId || !event.threadId || event.threadId === threadId,
+  );
+  const timings = new Map<string, { startedAt?: number; completedAt?: number; durationMs?: number }>();
+  for (const event of chronological) {
+    if (!event.turnId) continue;
+    const timing = timings.get(event.turnId) ?? {};
+    if (event.kind === 'TurnStarted') {
+      timing.startedAt = readTimestamp(event.data.startedAt) ?? event.occurredAt;
+    } else if (event.kind === 'TurnCompleted') {
+      timing.completedAt = readTimestamp(event.data.completedAt) ?? event.occurredAt;
+      timing.startedAt ??= readTimestamp(event.data.startedAt);
+      timing.durationMs = readNumber(event.data.durationMs) ?? resolveDurationMs(timing);
+    }
+    timings.set(event.turnId, timing);
+  }
+
   const entries: ChatEntry[] = [];
-  for (const event of [...events].reverse()) {
-    if (threadId && event.threadId && event.threadId !== threadId) continue;
+  for (const event of chronological) {
     const text = eventText(event.data);
+    const durationMs = event.turnId ? resolveDurationMs(timings.get(event.turnId)) : undefined;
     switch (event.kind) {
       case 'AgentMessageCompleted':
-        if (text) entries.push({ id: event.eventId, role: 'assistant', text });
+        if (text) entries.push({
+          id: event.eventId,
+          role: 'assistant',
+          text,
+          turnId: event.turnId,
+          occurredAt: event.occurredAt,
+          durationMs,
+        });
         break;
       case 'AgentMessageDelta':
-        if (text) entries.push({ id: event.eventId, role: 'assistant', text, meta: '实时回复', streaming: true });
+        if (text) entries.push({
+          id: event.eventId,
+          role: 'assistant',
+          text,
+          meta: '实时回复',
+          streaming: true,
+          turnId: event.turnId,
+          occurredAt: event.occurredAt,
+        });
         break;
       case 'CommandStarted':
       case 'CommandCompleted':
-        if (text) entries.push({ id: event.eventId, role: 'tool', text, meta: event.kind === 'CommandStarted' ? '运行命令' : '命令完成' });
+        if (text) entries.push({
+          id: event.eventId,
+          role: 'tool',
+          text,
+          meta: event.kind === 'CommandStarted' ? '运行命令' : '命令完成',
+          turnId: event.turnId,
+          occurredAt: event.occurredAt,
+          durationMs,
+        });
         break;
-      case 'FileChanged':
-        if (text) entries.push({ id: event.eventId, role: 'tool', text, meta: '修改文件' });
+      case 'FileChanged': {
+        const changes = readFileChanges(event.data.changes);
+        const changedFiles = changes.length > 0
+          ? formatFileChanges(changes)
+          : Array.isArray(event.data.paths)
+            ? event.data.paths.filter((value): value is string => typeof value === 'string').join('\n')
+            : text;
+        if (changedFiles) entries.push({
+          id: event.eventId,
+          role: 'tool',
+          text: changedFiles,
+          meta: '修改文件',
+          turnId: event.turnId,
+          occurredAt: event.occurredAt,
+          durationMs,
+          changes,
+        });
         break;
+      }
       case 'ErrorOccurred':
-        entries.push({ id: event.eventId, role: 'system', text: text || '任务发生错误' });
-        break;
-      case 'TurnStarted':
-        entries.push({ id: event.eventId, role: 'system', text: 'Turn 已开始' });
-        break;
-      case 'TurnCompleted':
-        entries.push({ id: event.eventId, role: 'system', text: `Turn ${text || '已完成'}` });
+        entries.push({
+          id: event.eventId,
+          role: 'system',
+          text: text || '任务发生错误',
+          turnId: event.turnId,
+          occurredAt: event.occurredAt,
+        });
         break;
     }
   }
@@ -1029,9 +1525,207 @@ function buildChatEntries(events: CodexEvent[], snapshot: CodexSnapshot | undefi
   return entries.slice(-80);
 }
 
+function foldProcessEntries(entries: ChatEntry[]): ChatEntry[] {
+  const folded: ChatEntry[] = [];
+  let buffer: ChatEntry[] = [];
+  const summarizedTurns = new Set<string>();
+
+  const flush = () => {
+    if (buffer.length === 0) return;
+    const deduplicated = new Map<string, ChatEntry>();
+    for (const item of buffer) {
+      deduplicated.set(`${item.turnId ?? ''}\u0000${item.text}`, item);
+    }
+    const processItems = [...deduplicated.values()];
+    const turnId = processItems[0]?.turnId;
+    if (turnId) summarizedTurns.add(turnId);
+    folded.push({
+      id: `summary_${processItems[0]?.id ?? crypto.randomUUID()}`,
+      role: 'summary',
+      text: '过程摘要',
+      turnId,
+      durationMs: processItems.find((item) => item.durationMs !== undefined)?.durationMs,
+      processItems,
+      changes: mergeFileChanges(processItems.flatMap((item) => item.changes ?? [])),
+    });
+    buffer = [];
+  };
+
+  for (const entry of entries) {
+    if (entry.role === 'tool') {
+      if (buffer.length > 0 && buffer[0].turnId !== entry.turnId) flush();
+      buffer.push(entry);
+      continue;
+    }
+    flush();
+    folded.push(entry);
+  }
+  flush();
+
+  return folded.map((entry) => entry.role === 'assistant' && entry.turnId && summarizedTurns.has(entry.turnId)
+    ? { ...entry, durationMs: undefined }
+    : entry);
+}
+
 function eventText(data: Record<string, unknown>) {
   const value = data.text ?? data.command ?? data.path ?? data.message ?? data.status;
   return typeof value === 'string' ? value : '';
+}
+
+function readEventStatus(event: CodexEvent) {
+  return typeof event.data.status === 'string' ? event.data.status : undefined;
+}
+
+function loadThreadActivities(deviceId: string): Record<string, ThreadActivityState> {
+  const stored = readStoredRecord(`codex-control-thread-activity:${deviceId}`);
+  const activities: Record<string, ThreadActivityState> = {};
+  for (const [threadId, value] of Object.entries(stored).slice(0, 200)) {
+    if (!value || typeof value !== 'object') continue;
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate.latestAt !== 'number' || !Number.isFinite(candidate.latestAt) ||
+        typeof candidate.status !== 'string' ||
+        !['running', 'completed', 'failed', 'updated'].includes(candidate.status)) continue;
+    activities[threadId] = {
+      latestAt: candidate.latestAt,
+      status: candidate.status as ThreadActivityStatus,
+    };
+  }
+  return activities;
+}
+
+function saveThreadActivities(deviceId: string, activities: Record<string, ThreadActivityState>) {
+  localStorage.setItem(`codex-control-thread-activity:${deviceId}`, JSON.stringify(activities));
+}
+
+function loadThreadReadReceipts(deviceId: string): Record<string, number> {
+  const stored = readStoredRecord(`codex-control-thread-read:${deviceId}`);
+  const receipts: Record<string, number> = {};
+  for (const [threadId, value] of Object.entries(stored).slice(0, 200)) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) receipts[threadId] = value;
+  }
+  return receipts;
+}
+
+function saveThreadReadReceipts(deviceId: string, receipts: Record<string, number>) {
+  localStorage.setItem(`codex-control-thread-read:${deviceId}`, JSON.stringify(receipts));
+}
+
+function readStoredRecord(key: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) ?? '{}') as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function readFileChanges(value: unknown): CodexThreadHistoryFileChange[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== 'object') return [];
+    const change = candidate as Record<string, unknown>;
+    if (typeof change.path !== 'string' || !change.path.trim()) return [];
+    return [{
+      path: change.path,
+      kind: typeof change.kind === 'string' ? change.kind : undefined,
+      additions: readNonNegativeInteger(change.additions),
+      deletions: readNonNegativeInteger(change.deletions),
+    }];
+  }).slice(0, 30);
+}
+
+function readNonNegativeInteger(value: unknown) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+function formatFileChanges(changes: CodexThreadHistoryFileChange[]) {
+  return changes.map((change) => {
+    const statistics = change.additions === undefined && change.deletions === undefined
+      ? ''
+      : `  +${change.additions ?? 0} -${change.deletions ?? 0}`;
+    return `${change.path}${statistics}`;
+  }).join('\n');
+}
+
+function mergeFileChanges(changes: CodexThreadHistoryFileChange[]) {
+  const merged = new Map<string, CodexThreadHistoryFileChange>();
+  for (const change of changes) {
+    const existing = merged.get(change.path);
+    if (!existing) {
+      merged.set(change.path, { ...change });
+      continue;
+    }
+    merged.set(change.path, {
+      path: change.path,
+      kind: change.kind ?? existing.kind,
+      additions: sumOptional(existing.additions, change.additions),
+      deletions: sumOptional(existing.deletions, change.deletions),
+    });
+  }
+  return [...merged.values()];
+}
+
+function sumOptional(left?: number, right?: number) {
+  return left === undefined && right === undefined ? undefined : (left ?? 0) + (right ?? 0);
+}
+
+function summarizeFileImpact(changes: CodexThreadHistoryFileChange[]) {
+  if (changes.length === 0) return undefined;
+  const additions = changes.reduce((sum, change) => sum + (change.additions ?? 0), 0);
+  const deletions = changes.reduce((sum, change) => sum + (change.deletions ?? 0), 0);
+  const hasStatistics = changes.some((change) => change.additions !== undefined || change.deletions !== undefined);
+  return hasStatistics
+    ? `影响 ${changes.length} 个文件 · +${additions} -${deletions}`
+    : `影响 ${changes.length} 个文件`;
+}
+
+function splitUserPrompt(text: string): { request: string; context?: string } {
+  const marker = /^#{1,3}\s+My request:\s*$/imu;
+  const match = marker.exec(text);
+  if (!match) return { request: text };
+  const context = text.slice(0, match.index).trim();
+  const request = text.slice(match.index + match[0].length).trim();
+  return request ? { request, context: context || undefined } : { request: text };
+}
+
+function resolveDurationMs(timing?: { startedAt?: number; completedAt?: number; durationMs?: number }) {
+  if (!timing) return undefined;
+  if (typeof timing.durationMs === 'number' && timing.durationMs >= 0) return timing.durationMs;
+  const startedAt = readTimestamp(timing.startedAt);
+  const completedAt = readTimestamp(timing.completedAt);
+  return startedAt !== undefined && completedAt !== undefined && completedAt >= startedAt
+    ? completedAt - startedAt
+    : undefined;
+}
+
+function readTimestamp(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return value < 1_000_000_000_000 ? value * 1_000 : value;
+}
+
+function readNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function formatDuration(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (totalSeconds < 60) return `${totalSeconds}秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds > 0 ? `${minutes}分${seconds}秒` : `${minutes}分钟`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}小时${remainingMinutes}分钟` : `${hours}小时`;
+}
+
+function processLabel(phase?: string) {
+  if (!phase) return '电脑操作';
+  if (/file/iu.test(phase)) return '修改文件';
+  if (/completed|succeeded|failed|declined/iu.test(phase)) return '命令完成';
+  if (/command|running|inProgress/iu.test(phase)) return '运行命令';
+  return phase;
 }
 
 function formatCode(value: string) {
@@ -1047,4 +1741,54 @@ function formatThreadTime(value?: number) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+interface PairingLink {
+  relayRoot: string;
+  code: string;
+  deviceName?: string;
+}
+
+function readPairingLink(): PairingLink | undefined {
+  if (!window.location.hash.startsWith('#/pair?')) return undefined;
+  try {
+    const parameters = new URLSearchParams(window.location.hash.slice('#/pair?'.length));
+    const encodedRelay = parameters.get('relay');
+    const code = parameters.get('code')?.replaceAll(/\D/gu, '') ?? '';
+    if (!encodedRelay || code.length !== 6) return undefined;
+    const padded = encodedRelay.replaceAll('-', '+').replaceAll('_', '/')
+      .padEnd(Math.ceil(encodedRelay.length / 4) * 4, '=');
+    const relayRoot = new TextDecoder().decode(
+      Uint8Array.from(atob(padded), (character) => character.charCodeAt(0)),
+    );
+    const root = new URL(relayRoot);
+    if (root.protocol !== 'https:' &&
+        !(root.protocol === 'http:' && (root.hostname === '127.0.0.1' || root.hostname === 'localhost'))) {
+      return undefined;
+    }
+    return { relayRoot: root.toString().replace(/\/$/u, ''), code, deviceName: parameters.get('device') ?? undefined };
+  } catch {
+    return undefined;
+  }
+}
+
+function controllerWebSocketUrl(relayRoot: string) {
+  const url = new URL(relayRoot);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.pathname = '/ws/controller';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function browserControllerName() {
+  const agent = navigator.userAgent;
+  const kind = /iPhone/iu.test(agent) ? 'iPhone'
+    : /iPad/iu.test(agent) ? 'iPad'
+      : /Android/iu.test(agent) ? 'Android'
+        : /Edg\//iu.test(agent) ? 'Edge'
+          : /Chrome\//iu.test(agent) ? 'Chrome'
+            : /Safari\//iu.test(agent) ? 'Safari'
+              : 'Browser';
+  return `${kind} · ${navigator.platform || 'Controller'}`.slice(0, 200);
 }

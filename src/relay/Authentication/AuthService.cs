@@ -170,7 +170,8 @@ public sealed class AuthService
         return ServiceResult<AuthOkPayload>.Success(new(
             peer.EndpointRole,
             principalId,
-            peer.ConnectionId));
+            peer.ConnectionId,
+            typeof(AuthService).Assembly.GetName().Version?.ToString(3)));
     }
 
     private static bool IsValidPrincipalId(string value, string prefix) =>

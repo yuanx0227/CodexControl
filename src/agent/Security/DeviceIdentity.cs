@@ -36,13 +36,29 @@ public sealed class DeviceIdentity : IDisposable
             {
                 var key = ECDsa.Create();
                 key.ImportPkcs8PrivateKey(privateKey, out _);
-                var identity = new DeviceIdentity(stored.DeviceId, stored.Name, key);
+                var effectiveName = string.IsNullOrWhiteSpace(deviceName) ? stored.Name : deviceName.Trim();
+                var identity = new DeviceIdentity(stored.DeviceId, effectiveName, key);
                 if (!CryptographicOperations.FixedTimeEquals(
                         Base64Url.Decode(identity.PublicKey),
                         Base64Url.Decode(stored.PublicKey)))
                 {
                     identity.Dispose();
                     throw new CryptographicException("Stored public key does not match DPAPI private key.");
+                }
+
+                if (!string.Equals(stored.Name, effectiveName, StringComparison.Ordinal))
+                {
+                    var updated = stored with { Name = effectiveName };
+                    var updatePath = string.Concat(path, ".tmp-", Guid.NewGuid().ToString("N"));
+                    try
+                    {
+                        File.WriteAllText(updatePath, JsonSerializer.Serialize(updated, RelayJson.Options));
+                        File.Move(updatePath, path, overwrite: true);
+                    }
+                    finally
+                    {
+                        if (File.Exists(updatePath)) File.Delete(updatePath);
+                    }
                 }
 
                 return identity;

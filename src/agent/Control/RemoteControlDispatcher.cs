@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using CodexControl.Agent.Codex;
 using CodexControl.Agent.Diagnostics;
@@ -20,16 +21,40 @@ public sealed class RemoteControlDispatcher
     private const int MaxThreadTurnPages = 5;
     private const int ProjectPageSize = 100;
     private const int MaxProjectPages = 5;
+    private const int ModelPageSize = 100;
+    private const int MaxModelPages = 5;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan HistoryTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ThreadMutationTimeout = TimeSpan.FromSeconds(30);
     private static readonly string[] UserThreadSourceKinds = ["cli", "vscode", "appServer", "exec", "unknown"];
     private const int MaxControlTextLength = 20_000;
     private const int MaxCwdLength = 2_048;
+    private const int MaxModelLength = 200;
+    private static readonly HashSet<string> AllowedApprovalPolicies =
+        new(["untrusted", "on-request", "never"], StringComparer.Ordinal);
+    private static readonly CodexApprovalPolicyOptionPayload[] ApprovalPolicyOptions =
+    [
+        new(
+            "untrusted",
+            "严格审批",
+            "仅可信操作直接执行，其他操作必须由控制端明确批准。",
+            true),
+        new(
+            "on-request",
+            "按需审批",
+            "Codex 可在需要越出当前限制时发起审批请求。",
+            false),
+        new(
+            "never",
+            "不发起审批",
+            "不弹出审批；超出 workspace-write 边界的操作会直接失败。",
+            false),
+    ];
 
     private readonly AppServerBridge _bridge;
     private readonly CodexStateManager _state;
-    private readonly SemaphoreSlim _threadMutationGate = new(1, 1);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _threadMutationGates =
+        new(StringComparer.Ordinal);
 
     public RemoteControlDispatcher(AppServerBridge bridge, CodexStateManager state)
     {
@@ -44,12 +69,13 @@ public sealed class RemoteControlDispatcher
         CancellationToken cancellationToken)
     {
         var snapshot = _state.Snapshot;
-        if (snapshot.ActiveThreadId != threadId || string.IsNullOrWhiteSpace(snapshot.ActiveTurnId))
+        var active = FindActiveTurn(snapshot, threadId);
+        if (active is null)
         {
             return Failure("TURN_NOT_ACTIVE", "指定 Thread 当前没有活动 Turn。");
         }
 
-        if (snapshot.ActiveTurnId != expectedTurnId)
+        if (active.TurnId != expectedTurnId)
         {
             return Failure("TURN_MISMATCH", "expectedTurnId 与当前活动 Turn 不一致。");
         }
@@ -118,6 +144,57 @@ public sealed class RemoteControlDispatcher
             return Success(JsonSerializer.SerializeToElement(
                 MapThreadList(result, projects),
                 RelayJson.Options));
+        }
+        catch (JsonException exception)
+        {
+            return Failure("APP_SERVER_PROTOCOL_ERROR", exception.Message);
+        }
+        catch (AppServerRpcException exception)
+        {
+            return Failure("APP_SERVER_PROTOCOL_ERROR", exception.Message);
+        }
+        catch (TimeoutException exception)
+        {
+            return Failure("APP_SERVER_TIMEOUT", exception.Message);
+        }
+        catch (AgentException exception)
+        {
+            return Failure(exception.Code, exception.Message);
+        }
+    }
+
+    public async Task<ControlDispatchResult> GetSessionOptionsAsync(
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var models = new List<CodexModelOptionPayload>();
+            string? cursor = null;
+            for (var page = 0; page < MaxModelPages; page++)
+            {
+                var result = await _bridge.SendRequestAsync(
+                    "model/list",
+                    new { cursor, limit = ModelPageSize, includeHidden = false },
+                    HistoryTimeout,
+                    cancellationToken).ConfigureAwait(false);
+                var mapped = MapModelPage(result);
+                models.AddRange(mapped.Models);
+                cursor = mapped.NextCursor;
+                if (cursor is null)
+                {
+                    break;
+                }
+            }
+
+            var payload = new CodexSessionOptionsPayload(
+                models
+                    .GroupBy(static value => value.Model, StringComparer.Ordinal)
+                    .Select(static group => group.First())
+                    .OrderByDescending(static value => value.IsDefault)
+                    .ThenBy(static value => value.DisplayName, StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                ApprovalPolicyOptions);
+            return Success(JsonSerializer.SerializeToElement(payload, RelayJson.Options));
         }
         catch (JsonException exception)
         {
@@ -241,7 +318,27 @@ public sealed class RemoteControlDispatcher
         string cwd,
         string text,
         CancellationToken cancellationToken) =>
-        MutateThreadAsync(
+        StartThreadAsync(cwd, text, null, null, cancellationToken);
+
+    public Task<ControlDispatchResult> StartThreadAsync(
+        string cwd,
+        string text,
+        string? model,
+        string? approvalPolicy,
+        CancellationToken cancellationToken)
+    {
+        var configurationFailure = ValidateSessionConfiguration(
+            model,
+            approvalPolicy,
+            out var selectedModel,
+            out var selectedApprovalPolicy);
+        if (configurationFailure is not null)
+        {
+            return Task.FromResult(configurationFailure);
+        }
+
+        return MutateThreadAsync(
+            null,
             async token =>
             {
                 if (!Path.IsPathFullyQualified(cwd) || cwd.Length > MaxCwdLength)
@@ -261,23 +358,50 @@ public sealed class RemoteControlDispatcher
                     {
                         cwd = fullCwd,
                         ephemeral = false,
-                        approvalPolicy = "untrusted",
+                        model = selectedModel,
+                        approvalPolicy = selectedApprovalPolicy,
                         sandbox = "workspace-write",
                         serviceName = "codex_control_remote",
                     },
                     ThreadMutationTimeout,
                     token).ConfigureAwait(false);
                 var threadId = ReadRequiredId(thread, "thread", "thread/start");
-                return await StartTurnCoreAsync(threadId, text, token).ConfigureAwait(false);
+                return await StartTurnCoreAsync(
+                    threadId,
+                    text,
+                    selectedModel,
+                    selectedApprovalPolicy,
+                    token).ConfigureAwait(false);
             },
             text,
             cancellationToken);
+    }
 
     public Task<ControlDispatchResult> ResumeThreadAsync(
         string threadId,
         string text,
         CancellationToken cancellationToken) =>
-        MutateThreadAsync(
+        ResumeThreadAsync(threadId, text, null, null, cancellationToken);
+
+    public Task<ControlDispatchResult> ResumeThreadAsync(
+        string threadId,
+        string text,
+        string? model,
+        string? approvalPolicy,
+        CancellationToken cancellationToken)
+    {
+        var configurationFailure = ValidateSessionConfiguration(
+            model,
+            approvalPolicy,
+            out var selectedModel,
+            out var selectedApprovalPolicy);
+        if (configurationFailure is not null)
+        {
+            return Task.FromResult(configurationFailure);
+        }
+
+        return MutateThreadAsync(
+            threadId,
             async token =>
             {
                 if (!IsValidThreadId(threadId))
@@ -290,16 +414,23 @@ public sealed class RemoteControlDispatcher
                     new
                     {
                         threadId,
-                        approvalPolicy = "untrusted",
+                        model = selectedModel,
+                        approvalPolicy = selectedApprovalPolicy,
                         sandbox = "workspace-write",
                     },
                     ThreadMutationTimeout,
                     token).ConfigureAwait(false);
                 var resumedThreadId = ReadRequiredId(resumed, "thread", "thread/resume");
-                return await StartTurnCoreAsync(resumedThreadId, text, token).ConfigureAwait(false);
+                return await StartTurnCoreAsync(
+                    resumedThreadId,
+                    text,
+                    selectedModel,
+                    selectedApprovalPolicy,
+                    token).ConfigureAwait(false);
             },
             text,
             cancellationToken);
+    }
 
     public async Task<ControlDispatchResult> InterruptAsync(
         string threadId,
@@ -307,7 +438,8 @@ public sealed class RemoteControlDispatcher
         CancellationToken cancellationToken)
     {
         var snapshot = _state.Snapshot;
-        if (snapshot.ActiveThreadId != threadId || snapshot.ActiveTurnId != turnId)
+        var active = FindActiveTurn(snapshot, threadId);
+        if (active?.TurnId != turnId)
         {
             return Failure("TURN_NOT_ACTIVE", "指定 Turn 当前不活动。");
         }
@@ -363,6 +495,7 @@ public sealed class RemoteControlDispatcher
     }
 
     private async Task<ControlDispatchResult> MutateThreadAsync(
+        string? targetThreadId,
         Func<CancellationToken, Task<ControlDispatchResult>> mutation,
         string text,
         CancellationToken cancellationToken)
@@ -372,12 +505,21 @@ public sealed class RemoteControlDispatcher
             return Failure("INVALID_CONTROL_PAYLOAD", "任务内容不能为空且不能超过 20000 个字符。");
         }
 
-        await _threadMutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        SemaphoreSlim? mutationGate = null;
+        if (!string.IsNullOrWhiteSpace(targetThreadId))
+        {
+            mutationGate = _threadMutationGates.GetOrAdd(
+                targetThreadId,
+                static _ => new SemaphoreSlim(1, 1));
+            await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         try
         {
-            if (!string.IsNullOrWhiteSpace(_state.Snapshot.ActiveTurnId))
+            if (!string.IsNullOrWhiteSpace(targetThreadId) &&
+                FindActiveTurn(_state.Snapshot, targetThreadId) is not null)
             {
-                return Failure("TURN_ALREADY_ACTIVE", "已有任务正在运行，请先 Steer 或停止当前任务。");
+                return Failure("TURN_ALREADY_ACTIVE", "指定 Thread 已有任务正在运行，请先 Steer 或停止该任务。");
             }
 
             try
@@ -407,13 +549,15 @@ public sealed class RemoteControlDispatcher
         }
         finally
         {
-            _threadMutationGate.Release();
+            mutationGate?.Release();
         }
     }
 
     private async Task<ControlDispatchResult> StartTurnCoreAsync(
         string threadId,
         string text,
+        string? model,
+        string approvalPolicy,
         CancellationToken cancellationToken)
     {
         var turn = await _bridge.SendRequestAsync(
@@ -421,7 +565,8 @@ public sealed class RemoteControlDispatcher
             new
             {
                 threadId,
-                approvalPolicy = "untrusted",
+                model,
+                approvalPolicy,
                 input = new[] { new { type = "text", text = text.Trim() } },
             },
             ThreadMutationTimeout,
@@ -431,6 +576,51 @@ public sealed class RemoteControlDispatcher
             new CodexThreadActionResultPayload(threadId, turnId),
             RelayJson.Options));
     }
+
+    private static ControlDispatchResult? ValidateSessionConfiguration(
+        string? model,
+        string? approvalPolicy,
+        out string? selectedModel,
+        out string selectedApprovalPolicy)
+    {
+        selectedModel = string.IsNullOrWhiteSpace(model) ? null : model.Trim();
+        selectedApprovalPolicy = string.IsNullOrWhiteSpace(approvalPolicy)
+            ? "untrusted"
+            : approvalPolicy.Trim();
+        if (selectedModel is { Length: > MaxModelLength } ||
+            selectedModel?.Any(char.IsWhiteSpace) == true ||
+            selectedModel?.Any(char.IsControl) == true)
+        {
+            return Failure("MODEL_INVALID", "模型 ID 无效。");
+        }
+
+        if (!AllowedApprovalPolicies.Contains(selectedApprovalPolicy))
+        {
+            return Failure("APPROVAL_POLICY_INVALID", "批准等级无效。");
+        }
+
+        return null;
+    }
+
+    private static CodexActiveTurnSnapshot? FindActiveTurn(
+        CodexStateSnapshot snapshot,
+        string threadId) =>
+        snapshot.ActiveTurns.FirstOrDefault(value => value.ThreadId == threadId) ??
+        (snapshot.ActiveThreadId == threadId && !string.IsNullOrWhiteSpace(snapshot.ActiveTurnId)
+            ? new CodexActiveTurnSnapshot(
+                threadId,
+                snapshot.ActiveTurnId,
+                snapshot.Status,
+                snapshot.StartedAt ?? snapshot.LastActivityAt,
+                snapshot.LastActivityAt,
+                snapshot.CurrentProject,
+                snapshot.CurrentActivity,
+                snapshot.RunningCommand,
+                snapshot.ChangedFiles,
+                snapshot.PendingApprovalCount,
+                snapshot.LastAgentMessage,
+                snapshot.LastError)
+            : null);
 
     private async Task<IReadOnlyList<CodexProjectSummaryPayload>> ListProjectsAsync(
         CancellationToken cancellationToken)
@@ -547,6 +737,37 @@ public sealed class RemoteControlDispatcher
         return new ProjectPage(projects, GetString(result, "nextCursor", 2_048));
     }
 
+    private static ModelPage MapModelPage(JsonElement result)
+    {
+        if (!result.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+        {
+            throw new JsonException("model/list 未返回 data 数组。");
+        }
+
+        var models = new List<CodexModelOptionPayload>();
+        foreach (var value in data.EnumerateArray())
+        {
+            var id = GetString(value, "id", MaxModelLength);
+            var model = GetString(value, "model", MaxModelLength);
+            var displayName = GetString(value, "displayName", 256);
+            if (string.IsNullOrWhiteSpace(id) ||
+                string.IsNullOrWhiteSpace(model) ||
+                string.IsNullOrWhiteSpace(displayName))
+            {
+                continue;
+            }
+
+            models.Add(new CodexModelOptionPayload(
+                id,
+                model,
+                displayName,
+                GetString(value, "description", 1_000) ?? string.Empty,
+                GetBoolean(value, "isDefault")));
+        }
+
+        return new ModelPage(models, GetString(result, "nextCursor", 2_048));
+    }
+
     private static string ReadRequiredId(JsonElement result, string objectProperty, string method)
     {
         if (result.TryGetProperty(objectProperty, out var value) &&
@@ -618,6 +839,10 @@ public sealed class RemoteControlDispatcher
         IReadOnlyList<CodexProjectSummaryPayload> Projects,
         string? NextCursor);
 
+    private sealed record ModelPage(
+        IReadOnlyList<CodexModelOptionPayload> Models,
+        string? NextCursor);
+
     private static string? GetString(JsonElement value, string propertyName, int maximumLength)
     {
         if (!value.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String)
@@ -638,6 +863,11 @@ public sealed class RemoteControlDispatcher
 
         return property.TryGetInt64(out var number) ? number : null;
     }
+
+    private static bool GetBoolean(JsonElement value, string propertyName) =>
+        value.TryGetProperty(propertyName, out var property) &&
+        property.ValueKind is JsonValueKind.True or JsonValueKind.False &&
+        property.GetBoolean();
 
     private static string GetStatus(JsonElement thread)
     {

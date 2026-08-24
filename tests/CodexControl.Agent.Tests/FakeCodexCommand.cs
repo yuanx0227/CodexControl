@@ -283,6 +283,40 @@ internal static class FakeCodexCommand
                 continue;
             }
 
+            if (method == "model/list")
+            {
+                using var resultDocument = JsonDocument.Parse("""
+                    {
+                      "data":[
+                        {
+                          "id":"gpt-5.6-sol",
+                          "model":"gpt-5.6-sol",
+                          "displayName":"GPT-5.6 Sol",
+                          "description":"Frontier coding model",
+                          "hidden":false,
+                          "isDefault":true,
+                          "defaultReasoningEffort":"low",
+                          "supportedReasoningEfforts":[]
+                        },
+                        {
+                          "id":"gpt-5.6-terra",
+                          "model":"gpt-5.6-terra",
+                          "displayName":"GPT-5.6 Terra",
+                          "description":"Balanced coding model",
+                          "hidden":false,
+                          "isDefault":false,
+                          "defaultReasoningEffort":"medium",
+                          "supportedReasoningEfforts":[]
+                        }
+                      ],
+                      "nextCursor":null
+                    }
+                    """);
+                await WriteAsync(JsonRpcProtocol.BuildResultResponse(id, resultDocument.RootElement))
+                    .ConfigureAwait(false);
+                continue;
+            }
+
             if (method == "thread/start")
             {
                 using var resultDocument = JsonDocument.Parse("""
@@ -313,7 +347,19 @@ internal static class FakeCodexCommand
 
             if (method == "turn/start")
             {
-                var threadId = message.GetProperty("params").GetProperty("threadId").GetString() ?? "thr-unknown";
+                var parameters = message.GetProperty("params");
+                var threadId = parameters.GetProperty("threadId").GetString() ?? "thr-unknown";
+                var taskText = parameters.GetProperty("input")[0].GetProperty("text").GetString();
+                if (taskText == "start a real remote task" &&
+                    (parameters.GetProperty("model").GetString() != "gpt-5.6-terra" ||
+                     parameters.GetProperty("approvalPolicy").GetString() != "on-request"))
+                {
+                    await WriteAsync(JsonRpcProtocol.BuildErrorResponse(
+                        id,
+                        -32602,
+                        "model and approvalPolicy were not forwarded")).ConfigureAwait(false);
+                    continue;
+                }
                 var turnId = string.Equals(threadId, "thr-created", StringComparison.Ordinal)
                     ? "turn-created"
                     : "turn-resumed";

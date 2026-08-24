@@ -51,7 +51,7 @@ Set-Location '.\src\web'
 npm test
 ```
 
-Playwright 使用本机 Edge channel 做 Chromium/Android 路径，并使用 Playwright WebKit + iPhone 15 profile 覆盖 Safari/WebKit 路径。系统宿主按 project token 生成独立一次性配对码，因此两种浏览器都运行真实 Relay/Web Crypto 配对与控制测试；全部测试串行，避免一次性状态竞态。
+Playwright 使用本机 Edge channel 做 Chromium/Android 路径，并使用 Playwright WebKit + iPhone 15 profile 覆盖 Safari/WebKit 路径。系统宿主按 project token 生成独立一次性配对码，因此两种浏览器都运行真实 Relay/Web Crypto 配对与控制测试；全部测试串行，避免一次性状态竞态。浏览器确定性场景还覆盖 `model/list` 选项、批准等级透传、两个活动 Thread 分别 Steer、第三个 Thread 并发创建，以及新建后历史索引延迟的乐观回显/重试。
 
 ## Real Codex
 
@@ -71,7 +71,7 @@ CODEX_CONTROL_REAL_CODEX_PATH=<temp>\codex.exe
 CODEX_CONTROL_RUN_REAL_TURNS=1
 ```
 
-真实测试覆盖两组边界：审批测试创建 ephemeral Thread，使用随机 `out/approval-probe-*.txt` 作为审批目标并必须 Decline；远程会话测试创建一个 persisted Thread，验证历史列表、首个 Turn、恢复、第二个 Turn、分页能力探测、`thread/turns/list` 状态/时间和兼容回退，finally 只用 `thread/delete` 删除这个测试创建的 Thread。Markdown/本地图片/过程摘要、文件行数统计、事件驱动输出、无周期历史读取、滚动锚点、运行/未读/完成未读状态和版本显示使用确定性 Agent 与 Playwright 测试覆盖；Desktop 外部会话必须显示不可订阅边界。
+真实测试覆盖两组边界：审批测试创建 ephemeral Thread，使用随机 `out/approval-probe-*.txt` 作为审批目标并必须 Decline；远程会话测试创建一个 persisted Thread，验证历史列表、首个 Turn、恢复、第二个 Turn、分页能力探测、`thread/turns/list` 状态/时间和兼容回退，finally 只用 `thread/delete` 删除这个测试创建的 Thread。模型/批准选项映射、多活动 Turn 状态隔离和跨 Thread 调度使用确定性 Agent 测试；Markdown/本地图片/过程摘要、文件行数统计、事件驱动输出、无周期历史读取、滚动锚点、运行/未读/完成未读状态和版本显示使用确定性 Agent 与 Playwright 测试覆盖；Desktop 外部会话必须显示不可订阅边界。
 
 ## Relay Migration
 
@@ -116,6 +116,13 @@ docker compose -f '.\deploy\docker-compose.yml' down -v
 & "C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -File '.\tools\Build-Release.ps1'
 ```
 
+若默认 `out/release` 中的旧 Agent 正在运行，使用经过脚本边界校验的独立目录，不强杀进程：
+
+```powershell
+& "C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -File '.\tools\Build-Release.ps1' `
+  -OutputRoot 'out\release-0.7.0'
+```
+
 输出：
 
 ```text
@@ -130,6 +137,33 @@ out/release/SHA256SUMS
 Agent/便携版的运行数据统一位于 `CodexControlAgent.exe` 同目录 `data\`。安装版默认位于
 `%LOCALAPPDATA%\Programs\CodexControl`；覆盖升级保留 `data\`，主动卸载默认删除但允许保留。
 未提供 `-SignToolCommand` 时，Release 明确生成 `UNSIGNED` 内部/测试安装包。
+
+## Production artifact rollout
+
+生产服务器使用不可变版本目录和稳定 Compose project name，避免源码构建上下文、证书或 `.env`
+混入 Git：
+
+1. 本机执行完整 `tools/Build-Release.ps1`，校验 `out/release/SHA256SUMS`。
+2. 只打包 `out/release/relay`、`web`、`deploy` 和 `SHA256SUMS`，上传到新的
+   `/opt/codex-control/releases/<version>-<commit>`；不得覆盖旧版本目录。
+3. 从当前版本受控复制 `.env` 与 `certs/` 到新版本的 `deploy/`，不输出其正文；复用固定
+   Compose project name `codex-control`，从而继续挂载 `codex-control_relay-data`。
+4. 在新版本执行：
+
+   ```bash
+   docker compose -p codex-control \
+     --env-file deploy/.env \
+     -f deploy/docker-compose.artifacts.yml \
+     config --quiet
+   docker compose -p codex-control \
+     --env-file deploy/.env \
+     -f deploy/docker-compose.artifacts.yml \
+     up -d --build --remove-orphans
+   ```
+
+5. Relay/Web healthy 且 HTTPS `/healthz`、PWA、Service Worker 和 WSS 握手通过后，原子切换
+   `/opt/codex-control/current`。失败时恢复旧 symlink，并用旧版本的同一 Compose project name
+   重新执行 `up -d`；保留旧版本目录和 named volume，不执行 `down -v`。
 
 ## Evidence boundary
 

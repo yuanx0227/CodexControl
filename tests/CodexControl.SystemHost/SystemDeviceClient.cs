@@ -177,6 +177,30 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
                             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
                         cancellationToken).ConfigureAwait(false);
                     break;
+                case RelayMessageTypes.ControlSessionOptions:
+                    await SendControlResultAsync(
+                        envelope,
+                        ControlResultStatus.Succeeded,
+                        JsonSerializer.SerializeToElement(
+                            new CodexSessionOptionsPayload(
+                            [
+                                new CodexModelOptionPayload(
+                                    "gpt-5.6-sol",
+                                    "gpt-5.6-sol",
+                                    "GPT-5.6 Sol",
+                                    "System test model",
+                                    true),
+                            ],
+                            [
+                                new CodexApprovalPolicyOptionPayload(
+                                    "untrusted",
+                                    "严格审批",
+                                    "System test policy",
+                                    true),
+                            ]),
+                            RelayJson.Options),
+                        cancellationToken).ConfigureAwait(false);
+                    break;
                 case RelayMessageTypes.ControlThreadList:
                     await SendControlResultAsync(
                         envelope,

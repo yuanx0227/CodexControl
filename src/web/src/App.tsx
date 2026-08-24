@@ -4,9 +4,12 @@ import remarkGfm from 'remark-gfm';
 import packageJson from '../package.json';
 import type {
   ApprovalRequested,
+  CodexActiveTurn,
+  CodexApprovalPolicy,
   CodexEvent,
   CodexProjectSummary,
   CodexSnapshot,
+  CodexSessionOptions,
   CodexThreadReadResult,
   CodexThreadHistoryAttachment,
   CodexThreadHistoryFileChange,
@@ -78,10 +81,8 @@ export function App() {
           await client.approve(selected.deviceId, approvalId, decision);
           showToast('审批结果已提交');
         }}
-        onInterrupt={async () => {
-          const snapshot = selected.snapshot;
-          if (!snapshot?.activeThreadId || !snapshot.activeTurnId) throw new Error('当前没有活动 Turn');
-          await client.interrupt(selected.deviceId, snapshot.activeThreadId, snapshot.activeTurnId);
+        onInterrupt={async (threadId, turnId) => {
+          await client.interrupt(selected.deviceId, threadId, turnId);
           showToast('停止请求已接受，等待 Interrupted 终态');
         }}
         onRevoke={async () => {
@@ -291,7 +292,8 @@ function PairingPanel({
 }
 
 function DeviceRow({ device, onOpen }: { device: DeviceSummary; onOpen: () => void }) {
-  const managedRunning = Boolean(device.snapshot?.activeThreadId && device.snapshot.activeTurnId);
+  const runningCount = activeTurnsForSnapshot(device.snapshot).length;
+  const managedRunning = runningCount > 0;
   return (
     <button className="device-row" onClick={onOpen} aria-label={`打开 ${device.name}`}>
       <span className="device-avatar">{device.name.slice(0, 1).toUpperCase()}</span>
@@ -299,14 +301,16 @@ function DeviceRow({ device, onOpen }: { device: DeviceSummary; onOpen: () => vo
         <strong>{device.name}</strong>
         <small>{device.online
           ? managedRunning
-            ? device.snapshot?.currentProject ?? 'Agent 托管任务运行中'
+            ? runningCount > 1
+              ? `${runningCount} 个 Agent 托管任务运行中`
+              : device.snapshot?.currentProject ?? 'Agent 托管任务运行中'
             : 'Agent 当前未托管任务'
           : '设备离线'}</small>
       </span>
       <StatusPill
         online={device.online}
         status={managedRunning ? device.snapshot?.status : 'Idle'}
-        label={managedRunning ? 'Agent 运行中' : device.online ? 'Agent 空闲' : undefined}
+        label={managedRunning ? `Agent 运行中${runningCount > 1 ? ` · ${runningCount}` : ''}` : device.online ? 'Agent 空闲' : undefined}
       />
       <span className="row-chevron">›</span>
     </button>
@@ -409,7 +413,7 @@ function DeviceWorkspace({
   relayVersion?: string;
   onBack: () => void;
   onApprove: (approvalId: string, decision: unknown) => Promise<void>;
-  onInterrupt: () => Promise<void>;
+  onInterrupt: (threadId: string, turnId: string) => Promise<void>;
   onRevoke: () => Promise<void>;
   onNotify: (message: string) => void;
   toast?: string;
@@ -420,7 +424,17 @@ function DeviceWorkspace({
   const [threadHistory, setThreadHistory] = useState<CodexThreadReadResult>();
   const [threadHistoryLoading, setThreadHistoryLoading] = useState(false);
   const [threadHistoryError, setThreadHistoryError] = useState<string>();
-  const [selectedThreadId, setSelectedThreadId] = useState<string>();
+  const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>(() =>
+    activeTurnsForSnapshot(device.snapshot)[0]?.threadId,
+  );
+  const [sessionOptions, setSessionOptions] = useState<CodexSessionOptions>();
+  const [sessionOptionsLoading, setSessionOptionsLoading] = useState(true);
+  const [selectedModel, setSelectedModel] = useState(() =>
+    loadSessionPreference(device.deviceId).model ?? '',
+  );
+  const [approvalPolicy, setApprovalPolicy] = useState<CodexApprovalPolicy>(() =>
+    loadSessionPreference(device.deviceId).approvalPolicy ?? 'untrusted',
+  );
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [newSession, setNewSession] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -448,25 +462,40 @@ function DeviceWorkspace({
   const preservedScrollTop = useRef(0);
   const userScrolling = useRef(false);
   const lastRefreshedCompletion = useRef<string | undefined>(undefined);
+  const optimisticThreadIds = useRef(new Set<string>());
   const snapshot = device.snapshot;
+  const activeTurns = useMemo(() => activeTurnsForSnapshot(snapshot), [snapshot]);
+  const activeTurnByThread = useMemo(
+    () => new Map(activeTurns.map((turn) => [turn.threadId, turn])),
+    [activeTurns],
+  );
   const workspaceConnection = authenticated
     ? connection
     : connection === 'offline'
       ? 'offline'
       : 'connecting';
 
-  const refreshThreads = useCallback(async () => {
-    setHistoryLoading(true);
-    setError(undefined);
+  const refreshThreads = useCallback(async (background = false) => {
+    if (!background) {
+      setHistoryLoading(true);
+      setError(undefined);
+    }
     try {
       const history = await client.listThreads(device.deviceId);
-      setThreads(history.threads);
+      setThreads((current) => {
+        const returnedIds = new Set(history.threads.map((thread) => thread.threadId));
+        returnedIds.forEach((threadId) => optimisticThreadIds.current.delete(threadId));
+        const optimistic = current.filter((thread) =>
+          optimisticThreadIds.current.has(thread.threadId) && !returnedIds.has(thread.threadId),
+        );
+        return [...optimistic, ...history.threads];
+      });
       setProjects(history.projects);
-      setError(undefined);
+      if (!background) setError(undefined);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      if (!background) setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      setHistoryLoading(false);
+      if (!background) setHistoryLoading(false);
     }
   }, [client, device.deviceId]);
 
@@ -477,7 +506,22 @@ function DeviceWorkspace({
       setThreadHistoryError(undefined);
     }
     try {
-      const history = await client.readThread(device.deviceId, threadId);
+      let history: CodexThreadReadResult | undefined;
+      let lastReason: unknown;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          history = await client.readThread(device.deviceId, threadId);
+          break;
+        } catch (reason) {
+          lastReason = reason;
+          const retryable = optimisticThreadIds.current.has(threadId) &&
+            isTransientNewThreadReadFailure(reason);
+          if (!retryable || attempt === 3) throw reason;
+          await wait(200 * (attempt + 1));
+          if (request !== threadHistoryRequest.current) return;
+        }
+      }
+      if (!history) throw lastReason ?? new Error('Agent 未返回会话内容');
       if (request !== threadHistoryRequest.current) return;
       setThreadHistory(history);
     } catch (reason) {
@@ -506,10 +550,38 @@ function DeviceWorkspace({
   }, [authenticated, device.online, refreshThreads]);
 
   useEffect(() => {
-    if (!snapshot?.activeThreadId) return;
-    setSelectedThreadId(snapshot.activeThreadId);
-    setNewSession(false);
-  }, [snapshot?.activeThreadId]);
+    if (!authenticated || !device.online) {
+      setSessionOptionsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSessionOptionsLoading(true);
+    void client.getSessionOptions(device.deviceId)
+      .then((options) => {
+        if (cancelled) return;
+        setSessionOptions(options);
+        setSelectedModel((current) => options.models.some((option) => option.model === current)
+          ? current
+          : options.models.find((option) => option.isDefault)?.model ?? options.models[0]?.model ?? '');
+        setApprovalPolicy((current) => options.approvalPolicies.some((option) => option.id === current)
+          ? current
+          : options.approvalPolicies.find((option) => option.isDefault)?.id ?? 'untrusted');
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => {
+        if (!cancelled) setSessionOptionsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, client, device.deviceId, device.online]);
+
+  useEffect(() => {
+    saveSessionPreference(device.deviceId, { model: selectedModel, approvalPolicy });
+  }, [approvalPolicy, device.deviceId, selectedModel]);
 
   useEffect(() => {
     if (newSession || selectedThreadId || threads.length === 0) return;
@@ -537,8 +609,8 @@ function DeviceWorkspace({
   }, [authenticated, device.online, loadThread, newSession, selectedThreadId]);
 
   useEffect(() => {
-    if (snapshot?.status === 'Interrupted') setInterrupting(false);
-  }, [snapshot?.status]);
+    if (!selectedThreadId || !activeTurnByThread.has(selectedThreadId)) setInterrupting(false);
+  }, [activeTurnByThread, selectedThreadId]);
 
   useEffect(() => {
     setThreadActivities((current) => {
@@ -564,26 +636,21 @@ function DeviceWorkspace({
   }, [events]);
 
   useEffect(() => {
-    if (!snapshot?.activeThreadId) return;
-    const status: ThreadActivityStatus = snapshot.activeTurnId
-      ? 'running'
-      : snapshot.status === 'Failed'
-        ? 'failed'
-        : snapshot.status === 'Completed' || snapshot.status === 'Interrupted'
-          ? 'completed'
-          : 'updated';
+    if (activeTurns.length === 0) return;
     setThreadActivities((current) => {
-      const existing = current[snapshot.activeThreadId!];
-      if (existing && existing.latestAt >= snapshot.lastActivityAt && existing.status === status) return current;
-      return {
-        ...current,
-        [snapshot.activeThreadId!]: {
-          latestAt: Math.max(existing?.latestAt ?? 0, snapshot.lastActivityAt),
-          status,
-        },
-      };
+      let next = current;
+      for (const active of activeTurns) {
+        const existing = next[active.threadId];
+        if (existing && existing.latestAt >= active.lastActivityAt && existing.status === 'running') continue;
+        if (next === current) next = { ...current };
+        next[active.threadId] = {
+          latestAt: Math.max(existing?.latestAt ?? 0, active.lastActivityAt),
+          status: 'running',
+        };
+      }
+      return next;
     });
-  }, [snapshot?.activeThreadId, snapshot?.activeTurnId, snapshot?.lastActivityAt, snapshot?.status]);
+  }, [activeTurns]);
 
   useEffect(() => saveThreadActivities(device.deviceId, threadActivities), [device.deviceId, threadActivities]);
   useEffect(() => saveThreadReadReceipts(device.deviceId, readReceipts), [device.deviceId, readReceipts]);
@@ -614,16 +681,22 @@ function DeviceWorkspace({
     });
   }, [navigation.projects, selectedThread]);
 
-  const hasActiveTurn = Boolean(snapshot?.activeThreadId && snapshot.activeTurnId);
+  const selectedActiveTurn = selectedThreadId ? activeTurnByThread.get(selectedThreadId) : undefined;
+  const hasActiveTurn = Boolean(selectedActiveTurn);
   const taskRunning = hasActiveTurn;
   const externalSession = Boolean(
-    selectedThreadId && selectedThreadId !== snapshot?.activeThreadId && !newSession,
+    selectedThreadId && !selectedActiveTurn && !newSession,
   );
-  const runningStartedAt = readTimestamp(snapshot?.startedAt);
+  const runningStartedAt = readTimestamp(selectedActiveTurn?.startedAt);
   const runningElapsedMs = taskRunning && runningStartedAt !== undefined
     ? Math.max(0, clockNow - runningStartedAt)
     : undefined;
-  const conversationId = snapshot?.activeThreadId ?? selectedThreadId;
+  const conversationId = selectedThreadId;
+  const conversationSnapshot = snapshotForActiveTurn(snapshot, selectedActiveTurn);
+  const displayedActivity = selectedActiveTurn?.currentActivity ??
+    (activeTurns.length === 0 ? snapshot?.currentActivity : undefined);
+  const displayedCommand = selectedActiveTurn?.runningCommand ??
+    (activeTurns.length === 0 ? snapshot?.runningCommand : undefined);
 
   useEffect(() => {
     if (!taskRunning) return;
@@ -634,10 +707,10 @@ function DeviceWorkspace({
   const eventEntries = useMemo(
     () => buildChatEntries(
       events,
-      snapshot?.activeThreadId === conversationId ? snapshot : undefined,
+      conversationSnapshot,
       conversationId,
     ),
-    [conversationId, events, snapshot],
+    [conversationId, conversationSnapshot, events],
   );
   const historicalEntries = useMemo<ChatEntry[]>(() => {
     if (!threadHistory) return [];
@@ -674,6 +747,9 @@ function DeviceWorkspace({
     event.kind === 'TurnCompleted' &&
     selectedThreadId &&
     event.threadId === selectedThreadId,
+  );
+  const selectedApprovals = approvals.filter((approval) =>
+    !approval.threadId || approval.threadId === selectedThreadId,
   );
 
   useEffect(() => {
@@ -750,7 +826,7 @@ function DeviceWorkspace({
     lastRefreshedCompletion.current = completedEvent.eventId;
     const timer = window.setTimeout(() => {
       void loadThread(selectedThreadId, true);
-      void refreshThreads();
+      void refreshThreads(true);
     }, 300);
     return () => window.clearTimeout(timer);
   }, [completedEvent, loadThread, refreshThreads, selectedThreadId]);
@@ -818,21 +894,64 @@ function DeviceWorkspace({
     ]);
     setComposer('');
     try {
-      if (hasActiveTurn) {
-        await client.steer(device.deviceId, snapshot!.activeThreadId!, snapshot!.activeTurnId!, text);
+      if (selectedActiveTurn) {
+        await client.steer(
+          device.deviceId,
+          selectedActiveTurn.threadId,
+          selectedActiveTurn.turnId,
+          text,
+        );
         onNotify('干预已送入当前 Turn');
       } else if (selectedThread) {
-        const action = await client.resumeThread(device.deviceId, selectedThread.threadId, text);
+        const action = await client.resumeThread(
+          device.deviceId,
+          selectedThread.threadId,
+          text,
+          selectedModel || undefined,
+          approvalPolicy,
+        );
+        setThreads((current) => current.map((thread) =>
+          thread.threadId === action.threadId ? { ...thread, status: 'active' } : thread,
+        ));
         setSelectedThreadId(action.threadId);
         setNewSession(false);
+        setThreadHistoryError(undefined);
         onNotify('历史会话已恢复，真实 Turn 已启动');
       } else {
-        const action = await client.startThread(device.deviceId, newCwd.trim(), text);
+        const cwd = newCwd.trim();
+        const action = await client.startThread(
+          device.deviceId,
+          cwd,
+          text,
+          selectedModel || undefined,
+          approvalPolicy,
+        );
+        optimisticThreadIds.current.add(action.threadId);
+        const matchingProject = projects.find((project) =>
+          project.roots.some((root) => normalizeProjectPath(root) === normalizeProjectPath(cwd)),
+        );
+        setThreads((current) => current.some((thread) => thread.threadId === action.threadId)
+          ? current.map((thread) => thread.threadId === action.threadId
+            ? { ...thread, status: 'active', cwd: thread.cwd ?? cwd }
+            : thread)
+          : [{
+              threadId: action.threadId,
+              preview: text.slice(0, 1_000),
+              cwd,
+              createdAt: Math.floor(Date.now() / 1_000),
+              updatedAt: Math.floor(Date.now() / 1_000),
+              recencyAt: Math.floor(Date.now() / 1_000),
+              status: 'active',
+              sourceKind: 'appServer',
+              projectId: matchingProject?.projectId,
+            }, ...current]);
         setSelectedThreadId(action.threadId);
         setNewSession(false);
+        setThreadHistory(undefined);
+        setThreadHistoryError(undefined);
         onNotify('新会话已创建，真实 Turn 已启动');
       }
-      await refreshThreads();
+      window.setTimeout(() => void refreshThreads(true), 300);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -878,8 +997,7 @@ function DeviceWorkspace({
         </div>
         <button
           className="new-chat-button"
-          disabled={taskRunning}
-          title={taskRunning ? '请先等待当前任务完成' : '新建任务'}
+          title="新建任务"
           onClick={() => beginNewSession()}
         >
           <span>＋</span> 新建任务
@@ -917,7 +1035,6 @@ function DeviceWorkspace({
                           className="project-new-button"
                           aria-label={`在 ${group.name} 中新建会话`}
                           title={`在 ${group.name} 中新建会话`}
-                          disabled={taskRunning}
                           onClick={() => beginNewSession(group.cwd)}
                         >＋</button>
                       )}
@@ -984,7 +1101,7 @@ function DeviceWorkspace({
             <strong>{title}</strong>
             <span>{newSession
               ? newCwd.trim() || '选择电脑上的项目目录'
-              : `${selectedThread?.cwd ?? threadHistory?.cwd ?? snapshot?.currentProject ?? device.name}` +
+              : `${selectedThread?.cwd ?? threadHistory?.cwd ?? selectedActiveTurn?.currentProject ?? device.name}` +
                 (externalSession ? ' · Desktop 外部会话（状态不可订阅）' : '')}</span>
           </div>
           <StatusPill
@@ -996,9 +1113,10 @@ function DeviceWorkspace({
             className="stop-button"
             disabled={busy || !hasActiveTurn}
             onClick={() => {
+              if (!selectedActiveTurn) return;
               setBusy(true);
               setError(undefined);
-              void onInterrupt()
+              void onInterrupt(selectedActiveTurn.threadId, selectedActiveTurn.turnId)
                 .then(() => setInterrupting(true))
                 .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
                 .finally(() => setBusy(false));
@@ -1008,13 +1126,13 @@ function DeviceWorkspace({
           </button>
         </header>
 
-        {(taskRunning || snapshot?.currentActivity || snapshot?.runningCommand) && (
+        {(taskRunning || displayedActivity || displayedCommand) && (
           <div className="runtime-strip">
             <span className="pulse-dot" />
             <span>{taskRunning
-              ? hasActiveTurn ? snapshot?.currentActivity ?? '任务正在运行' : '任务正在运行'
-              : snapshot?.currentActivity}</span>
-            {snapshot?.runningCommand && <code>{snapshot.runningCommand}</code>}
+              ? displayedActivity ?? '任务正在运行'
+              : displayedActivity}</span>
+            {displayedCommand && <code>{displayedCommand}</code>}
             {runningElapsedMs !== undefined && (
               <strong className="runtime-elapsed">已运行 {formatDuration(runningElapsedMs)}</strong>
             )}
@@ -1097,7 +1215,7 @@ function DeviceWorkspace({
             </div>
           )}
 
-          {approvals.map((approval) => (
+          {selectedApprovals.map((approval) => (
             <ApprovalCard
               key={approval.approvalId}
               approval={approval}
@@ -1144,6 +1262,44 @@ function DeviceWorkspace({
             </div>
           )}
           <form className="composer" onSubmit={submit}>
+            <div className="session-options" aria-label="会话运行选项">
+              <label>
+                <span>模型</span>
+                <select
+                  aria-label="模型"
+                  value={selectedModel}
+                  disabled={sessionOptionsLoading}
+                  title={hasActiveTurn ? '当前 Steer 不改变模型；选择将在下一次 Turn 生效' : '选择下一次 Turn 使用的模型'}
+                  onChange={(event) => setSelectedModel(event.target.value)}
+                >
+                  <option value="">Codex 默认模型</option>
+                  {selectedModel && !sessionOptions?.models.some((option) => option.model === selectedModel) && (
+                    <option value={selectedModel}>{selectedModel}</option>
+                  )}
+                  {sessionOptions?.models.map((option) => (
+                    <option key={option.id} value={option.model} title={option.description}>
+                      {option.displayName}{option.isDefault ? ' · 默认' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>批准等级</span>
+                <select
+                  aria-label="批准等级"
+                  value={approvalPolicy}
+                  disabled={sessionOptionsLoading}
+                  title={hasActiveTurn ? '当前 Turn 不变；选择将在下一次 Turn 生效' : '选择下一次 Turn 的批准等级'}
+                  onChange={(event) => setApprovalPolicy(event.target.value as CodexApprovalPolicy)}
+                >
+                  {approvalPolicyOptions(sessionOptions).map((option) => (
+                    <option key={option.id} value={option.id} title={option.description}>
+                      {option.displayName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <label className="sr-only" htmlFor="chat-composer">{composerLabel}</label>
             <textarea
               id="chat-composer"
@@ -1574,6 +1730,104 @@ function eventText(data: Record<string, unknown>) {
 
 function readEventStatus(event: CodexEvent) {
   return typeof event.data.status === 'string' ? event.data.status : undefined;
+}
+
+function activeTurnsForSnapshot(snapshot?: CodexSnapshot): CodexActiveTurn[] {
+  const advertised = snapshot?.activeTurns?.filter((turn) =>
+    Boolean(turn.threadId && turn.turnId),
+  ) ?? [];
+  if (advertised.length > 0) return advertised;
+  if (!snapshot?.activeThreadId || !snapshot.activeTurnId) return [];
+  return [{
+    threadId: snapshot.activeThreadId,
+    turnId: snapshot.activeTurnId,
+    status: snapshot.status,
+    startedAt: snapshot.startedAt ?? snapshot.lastActivityAt,
+    lastActivityAt: snapshot.lastActivityAt,
+    currentProject: snapshot.currentProject,
+    currentActivity: snapshot.currentActivity,
+    runningCommand: snapshot.runningCommand,
+    changedFiles: snapshot.changedFiles,
+    pendingApprovalCount: snapshot.pendingApprovalCount,
+    lastAgentMessage: snapshot.lastAgentMessage,
+    lastError: snapshot.lastError,
+  }];
+}
+
+function snapshotForActiveTurn(
+  snapshot: CodexSnapshot | undefined,
+  active: CodexActiveTurn | undefined,
+): CodexSnapshot | undefined {
+  if (!snapshot || !active) return undefined;
+  return {
+    ...snapshot,
+    status: active.status,
+    activeThreadId: active.threadId,
+    activeTurnId: active.turnId,
+    startedAt: active.startedAt,
+    lastActivityAt: active.lastActivityAt,
+    currentProject: active.currentProject,
+    currentActivity: active.currentActivity,
+    runningCommand: active.runningCommand,
+    changedFiles: active.changedFiles,
+    pendingApprovalCount: active.pendingApprovalCount,
+    lastAgentMessage: active.lastAgentMessage,
+    lastError: active.lastError,
+  };
+}
+
+function approvalPolicyOptions(options?: CodexSessionOptions) {
+  return options?.approvalPolicies.length ? options.approvalPolicies : [
+    {
+      id: 'untrusted' as const,
+      displayName: '严格审批',
+      description: '仅可信操作直接执行，其他操作必须明确批准。',
+      isDefault: true,
+    },
+    {
+      id: 'on-request' as const,
+      displayName: '按需审批',
+      description: 'Codex 可在需要时发起审批请求。',
+      isDefault: false,
+    },
+    {
+      id: 'never' as const,
+      displayName: '不发起审批',
+      description: '超出 workspace-write 边界的操作会直接失败。',
+      isDefault: false,
+    },
+  ];
+}
+
+interface SessionPreference {
+  model?: string;
+  approvalPolicy?: CodexApprovalPolicy;
+}
+
+function loadSessionPreference(deviceId: string): SessionPreference {
+  const stored = readStoredRecord(`codex-control-session-options:${deviceId}`);
+  const approval = stored.approvalPolicy;
+  return {
+    model: typeof stored.model === 'string' ? stored.model : undefined,
+    approvalPolicy: approval === 'untrusted' || approval === 'on-request' || approval === 'never'
+      ? approval
+      : undefined,
+  };
+}
+
+function saveSessionPreference(deviceId: string, preference: SessionPreference) {
+  localStorage.setItem(`codex-control-session-options:${deviceId}`, JSON.stringify(preference));
+}
+
+function isTransientNewThreadReadFailure(reason: unknown) {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  return message.startsWith('THREAD_NOT_FOUND:') ||
+    message.startsWith('THREAD_READ_FAILED:') ||
+    message.startsWith('APP_SERVER_TIMEOUT:');
+}
+
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function loadThreadActivities(deviceId: string): Record<string, ThreadActivityState> {

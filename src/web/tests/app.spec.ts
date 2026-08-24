@@ -17,6 +17,8 @@ async function installRelayMock(page: Page, options: {
   desktopOwnedActiveTurn?: boolean;
   extraSingletonProjects?: number;
   historyEntryCount?: number;
+  activeThreadIds?: string[];
+  newThreadReadFailures?: number;
   richHistory?: boolean;
   registeredControllerWithoutPairing?: boolean;
 } = {}) {
@@ -29,6 +31,21 @@ async function installRelayMock(page: Page, options: {
   let connectionCount = 0;
   let disconnectThreadListOnce = options.disconnectThreadListOnce ?? false;
   let disconnectThreadReadOnce = options.disconnectThreadReadOnce ?? false;
+  let newThreadReadFailures = options.newThreadReadFailures ?? 0;
+  const activeThreadIds = options.activeThreadIds ?? (activeTurn ? ['thr-1'] : []);
+  const activeTurns = new Map(activeThreadIds.map((threadId, index) => [threadId, {
+    threadId,
+    turnId: `turn-${index + 1}`,
+    status: 'Thinking',
+    startedAt: Date.now() - (index + 1) * 60_000,
+    lastActivityAt: Date.now(),
+    currentProject: 'D:\\Projects\\MES',
+    currentActivity: 'Running tests',
+    runningCommand: 'dotnet test',
+    changedFiles: ['src/LoginService.cs'],
+    pendingApprovalCount: 0,
+    lastAgentMessage: '正在修复失败测试',
+  }]));
   const threadSummaries = [{
     threadId: 'thr-history-1',
     name: '历史测试会话',
@@ -126,6 +143,26 @@ async function installRelayMock(page: Page, options: {
   await page.routeWebSocket('**/ws/controller', (socket) => {
     connectionCount += 1;
     route = socket;
+    const sendActiveSnapshot = () => {
+      const currentActiveTurns = [...activeTurns.values()];
+      const primaryActive = currentActiveTurns[0];
+      socket.send(JSON.stringify(reply('codex.snapshot', undefined, {
+        revision: 10 + currentActiveTurns.length,
+        status: primaryActive?.status ?? 'Idle',
+        activeThreadId: primaryActive?.threadId,
+        activeTurnId: primaryActive?.turnId,
+        startedAt: primaryActive?.startedAt,
+        lastActivityAt: Date.now(),
+        currentProject: primaryActive?.currentProject ?? 'D:\\Projects\\MES',
+        currentActivity: primaryActive?.currentActivity,
+        runningCommand: primaryActive?.runningCommand,
+        changedFiles: primaryActive?.changedFiles ?? [],
+        pendingApprovalCount: 0,
+        lastAgentMessage: primaryActive?.lastAgentMessage,
+        agentVersion: '0.7.0-test',
+        activeTurns: currentActiveTurns,
+      }, deviceId)));
+    };
     socket.onMessage((message) => {
       const envelope = JSON.parse(String(message)) as CapturedMessage;
       captured.push(envelope);
@@ -136,7 +173,7 @@ async function installRelayMock(page: Page, options: {
               role: 'controller',
               principalId: envelope.controllerId,
               connectionId: `conn-${connectionCount}`,
-              serverVersion: '0.6.0-test',
+              serverVersion: '0.7.0-test',
             }, undefined, envelope.controllerId)));
           } else {
             socket.send(JSON.stringify(reply('error', envelope.requestId, {
@@ -157,10 +194,12 @@ async function installRelayMock(page: Page, options: {
             deviceId,
             controllerId: envelope.controllerId,
             permissions: { view: true, steer: true, interrupt: true, approval: true },
-            serverVersion: '0.6.0-test',
+            serverVersion: '0.7.0-test',
           }, deviceId, envelope.controllerId)));
           break;
-        case 'device.list':
+        case 'device.list': {
+          const currentActiveTurns = [...activeTurns.values()];
+          const primaryActive = currentActiveTurns[0];
           socket.send(JSON.stringify(reply('device.list.result', envelope.requestId, {
             devices: paired ? [{
               deviceId,
@@ -169,27 +208,65 @@ async function installRelayMock(page: Page, options: {
               lastSeenAt: Date.now(),
               snapshot: {
                 revision: 7,
-                status: activeTurn ? 'Thinking' : 'Idle',
-                activeThreadId: activeTurn ? 'thr-1' : undefined,
-                activeTurnId: activeTurn ? 'turn-1' : undefined,
-                startedAt: activeTurn ? Date.now() - 60_000 : undefined,
+                status: primaryActive?.status ?? 'Idle',
+                activeThreadId: primaryActive?.threadId,
+                activeTurnId: primaryActive?.turnId,
+                startedAt: primaryActive?.startedAt,
                 lastActivityAt: Date.now(),
                 currentProject: 'D:\\Projects\\MES',
-                currentActivity: activeTurn ? 'Running tests' : undefined,
-                runningCommand: activeTurn ? 'dotnet test' : undefined,
+                currentActivity: primaryActive?.currentActivity,
+                runningCommand: primaryActive?.runningCommand,
                 changedFiles: ['src/LoginService.cs'],
                 pendingApprovalCount: 0,
                 lastAgentMessage: '正在修复失败测试',
-                agentVersion: '0.6.0-test',
+                agentVersion: '0.7.0-test',
+                activeTurns: currentActiveTurns,
               },
             }] : [],
           }, undefined, envelope.controllerId)));
           break;
+        }
         case 'control.steer':
         case 'control.interrupt':
         case 'control.approval':
           socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
             status: envelope.type === 'control.interrupt' ? 'accepted' : 'succeeded',
+          }, envelope.deviceId, envelope.controllerId)));
+          break;
+        case 'control.session.options':
+          socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
+            status: 'succeeded',
+            result: {
+              models: [{
+                id: 'gpt-5.6-sol',
+                model: 'gpt-5.6-sol',
+                displayName: 'GPT-5.6 Sol',
+                description: 'Frontier coding model',
+                isDefault: true,
+              }, {
+                id: 'gpt-5.6-terra',
+                model: 'gpt-5.6-terra',
+                displayName: 'GPT-5.6 Terra',
+                description: 'Balanced coding model',
+                isDefault: false,
+              }],
+              approvalPolicies: [{
+                id: 'untrusted',
+                displayName: '严格审批',
+                description: 'Strict approvals',
+                isDefault: true,
+              }, {
+                id: 'on-request',
+                displayName: '按需审批',
+                description: 'Ask when needed',
+                isDefault: false,
+              }, {
+                id: 'never',
+                displayName: '不发起审批',
+                description: 'Fail outside the sandbox',
+                isDefault: false,
+              }],
+            },
           }, envelope.deviceId, envelope.controllerId)));
           break;
         case 'control.thread.list':
@@ -223,6 +300,15 @@ async function installRelayMock(page: Page, options: {
             break;
           }
           const threadId = String(envelope.payload.threadId);
+          if (threadId === 'thr-created' && newThreadReadFailures > 0) {
+            newThreadReadFailures -= 1;
+            socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
+              status: 'failed',
+              code: 'THREAD_READ_FAILED',
+              message: 'new thread history is not indexed yet',
+            }, envelope.deviceId, envelope.controllerId)));
+            break;
+          }
           socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
             status: 'succeeded',
             result: {
@@ -256,18 +342,49 @@ async function installRelayMock(page: Page, options: {
           }, envelope.deviceId, envelope.controllerId)));
           break;
         }
-        case 'control.thread.start':
+        case 'control.thread.start': {
           socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
             status: 'succeeded',
             result: { threadId: 'thr-created', turnId: 'turn-created' },
           }, envelope.deviceId, envelope.controllerId)));
+          activeTurns.set('thr-created', {
+            threadId: 'thr-created',
+            turnId: 'turn-created',
+            status: 'Thinking',
+            startedAt: Date.now(),
+            lastActivityAt: Date.now(),
+            currentProject: String(envelope.payload.cwd),
+            currentActivity: 'Codex is thinking',
+            runningCommand: undefined,
+            changedFiles: [],
+            pendingApprovalCount: 0,
+            lastAgentMessage: undefined,
+          });
+          sendActiveSnapshot();
           break;
-        case 'control.thread.resume':
+        }
+        case 'control.thread.resume': {
+          const threadId = String(envelope.payload.threadId);
           socket.send(JSON.stringify(reply('control.result', envelope.requestId, {
             status: 'succeeded',
-            result: { threadId: envelope.payload.threadId, turnId: 'turn-resumed' },
+            result: { threadId, turnId: 'turn-resumed' },
           }, envelope.deviceId, envelope.controllerId)));
+          activeTurns.set(threadId, {
+            threadId,
+            turnId: 'turn-resumed',
+            status: 'Thinking',
+            startedAt: Date.now(),
+            lastActivityAt: Date.now(),
+            currentProject: 'D:\\Projects\\MES',
+            currentActivity: 'Codex is thinking',
+            runningCommand: undefined,
+            changedFiles: [],
+            pendingApprovalCount: 0,
+            lastAgentMessage: undefined,
+          });
+          sendActiveSnapshot();
           break;
+        }
         case 'pairing.revoke':
           socket.send(JSON.stringify(reply('pairing.revoked', envelope.requestId, envelope.payload, envelope.deviceId, envelope.controllerId)));
           break;
@@ -431,13 +548,13 @@ test('pairs with a signed proof and renders the recovered device snapshot', asyn
   expect(String(claim?.payload.controllerId)).toMatch(/^ctl_[a-f0-9]{32}$/u);
   expect(String(claim?.payload.publicKey).length).toBeGreaterThan(80);
   expect(String(claim?.payload.proofSignature).length).toBeGreaterThan(80);
-  await expect(page.getByText('Web v0.6.0 · Relay v0.6.0-test · Protocol v2', { exact: true })).toBeVisible();
+  await expect(page.getByText('Web v0.7.0 · Relay v0.7.0-test · Protocol v2', { exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
   await expect(page.getByRole('main').getByText('D:\\Projects\\MES', { exact: true })).toBeVisible();
   await expect(page.getByText('dotnet test')).toBeVisible();
   await expect(page.getByText('正在修复失败测试')).toBeVisible();
-  await expect(page.getByText('Agent v0.6.0-test', { exact: true })).toBeVisible();
+  await expect(page.getByText('Agent v0.7.0-test', { exact: true })).toBeVisible();
 });
 
 test('re-pairs an authenticated Controller whose old Pairing was removed', async ({ page }) => {
@@ -589,13 +706,18 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
   await expect(page.getByText('最近', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '在 Vision 中新建会话' })).toHaveCount(0);
   await page.getByRole('button', { name: '在 MES 中新建会话' }).click();
+  await expect(page.getByLabel('模型')).toHaveValue('gpt-5.6-sol');
+  await page.getByLabel('模型').selectOption('gpt-5.6-terra');
+  await page.getByLabel('批准等级').selectOption('on-request');
   await expect(page.getByLabel('电脑上的项目目录')).toHaveValue('D:\\Projects\\MES');
   await page.getByLabel('第一条任务').fill('在 MES 项目中新建任务');
   await page.getByRole('button', { name: '创建会话并开始' }).click();
   await expect.poll(() => relay.captured.some((message) =>
     message.type === 'control.thread.start'
       && message.payload.cwd === 'D:\\Projects\\MES'
-      && message.payload.text === '在 MES 项目中新建任务',
+      && message.payload.text === '在 MES 项目中新建任务'
+      && message.payload.model === 'gpt-5.6-terra'
+      && message.payload.approvalPolicy === 'on-request',
   )).toBe(true);
 
   await page.getByRole('button', { name: '打开会话栏' }).click();
@@ -608,7 +730,7 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
     message.type === 'control.thread.read' && message.payload.threadId === 'thr-history-1',
   )).toBe(true);
   await page.getByRole('button', { name: '打开会话栏' }).click();
-  await page.getByRole('button', { name: '新建任务' }).click();
+  await page.locator('.new-chat-button').click();
   await page.getByLabel('电脑上的项目目录').fill('D:\\Projects\\NewProject');
   await page.getByLabel('第一条任务').fill('从手机创建真实会话');
   await page.getByRole('button', { name: '创建会话并开始' }).click();
@@ -623,6 +745,61 @@ test('lists real history and starts or resumes Codex sessions', async ({ page })
   await expect.poll(() => relay.captured.some((message) =>
     message.type === 'control.thread.resume' && message.payload.threadId === 'thr-history-1',
   )).toBe(true);
+});
+
+test('manages multiple active sessions and keeps a new session stable while history is indexing', async ({ page }) => {
+  const relay = await installRelayMock(page, {
+    activeTurn: false,
+    activeThreadIds: ['thr-history-1', 'thr-history-2'],
+    newThreadReadFailures: 2,
+  });
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+
+  await expect(page.getByLabel('模型')).toBeEnabled();
+  await expect(page.getByLabel('批准等级')).toBeEnabled();
+  await page.getByLabel('模型').selectOption('gpt-5.6-terra');
+  await page.getByLabel('批准等级').selectOption('on-request');
+  await page.getByLabel('Steer 当前任务').fill('干预第一个会话');
+  await page.getByRole('button', { name: '发送 Steer' }).click();
+  await expect.poll(() => relay.captured.some((message) =>
+    message.type === 'control.steer' &&
+    message.payload.threadId === 'thr-history-1' &&
+    message.payload.expectedTurnId === 'turn-1',
+  )).toBe(true);
+
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  await page.getByRole('button', { name: /^MES 第二个会话/u }).click();
+  await page.getByLabel('Steer 当前任务').fill('干预第二个会话');
+  await page.getByRole('button', { name: '发送 Steer' }).click();
+  await expect.poll(() => relay.captured.some((message) =>
+    message.type === 'control.steer' &&
+    message.payload.threadId === 'thr-history-2' &&
+    message.payload.expectedTurnId === 'turn-2',
+  )).toBe(true);
+
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  await page.locator('.new-chat-button').click();
+  await page.getByLabel('电脑上的项目目录').fill('D:\\Projects\\Concurrent');
+  await page.getByLabel('模型').selectOption('gpt-5.6-terra');
+  await page.getByLabel('批准等级').selectOption('on-request');
+  await page.getByLabel('第一条任务').fill('并发新会话任务');
+  await page.getByRole('button', { name: '创建会话并开始' }).click();
+
+  await expect(page.locator('.chat-message.user').getByText('并发新会话任务', { exact: true })).toBeVisible();
+  await expect(page.getByText('new thread history is not indexed yet')).toHaveCount(0);
+  await expect.poll(() => relay.captured.some((message) =>
+    message.type === 'control.thread.start' &&
+    message.payload.model === 'gpt-5.6-terra' &&
+    message.payload.approvalPolicy === 'on-request',
+  )).toBe(true);
+
+  await page.getByRole('button', { name: '打开会话栏' }).click();
+  await expect(page.getByRole('button', { name: /^并发新会话任务/u })).toBeVisible();
+  const mesProject = page.getByRole('button', { name: '项目 MES' });
+  await mesProject.click();
+  const mesRegionId = await mesProject.getAttribute('aria-controls');
+  await expect(page.locator(`#${mesRegionId} .thread-indicator.running`)).toHaveCount(2);
 });
 
 test('renders markdown images elapsed time and a folded process summary', async ({ page }) => {

@@ -111,6 +111,7 @@ heartbeat.ack
 control.steer
 control.interrupt
 control.approval
+control.session.options
 control.thread.list
 control.thread.read
 control.thread.start
@@ -418,6 +419,22 @@ Controller: 0.5s, 1s, 2s, 5s, 10s, 10s...
     "changedFiles": ["src/LoginService.cs"],
     "pendingApprovalCount": 0,
     "lastAgentMessage": "正在修复失败测试",
+    "activeTurns": [
+      {
+        "threadId": "thr_123",
+        "turnId": "turn_456",
+        "status": "RunningCommand",
+        "startedAt": 1787378000000,
+        "lastActivityAt": 1787378400000,
+        "currentProject": "D:\\Projects\\MES",
+        "currentActivity": "Running tests",
+        "runningCommand": "dotnet test",
+        "changedFiles": ["src/LoginService.cs"],
+        "pendingApprovalCount": 0,
+        "lastAgentMessage": "正在修复失败测试",
+        "lastError": null
+      }
+    ],
     "relayConnected": true
   }
 }
@@ -428,6 +445,8 @@ Controller: 0.5s, 1s, 2s, 5s, 10s, 10s...
 - `revision` 对一个 Device 单调递增；
 - 重连后先发 Snapshot，再发增量 Event；
 - Relay 只缓存最新 Snapshot；
+- `activeTurns[]` 是按 Thread 划分的 Agent 托管活动 Turn；一个 Thread 最多一个活动 Turn，不同 Thread 可同时活动；
+- 顶层 `activeThreadId/activeTurnId/status` 保留为兼容焦点，Controller 的多会话控制必须以 `activeTurns[]` 为准；
 - `lastAgentMessage` 和路径必须执行长度限制和日志脱敏；
 - Snapshot 不包含完整对话历史。
 
@@ -481,6 +500,20 @@ Relay 默认不持久化完整 `data`；审计只保留 event kind、标识符�
 
 ## 12. 真实会话控制
 
+读取可选模型和批准等级：
+
+```json
+{
+  "type": "control.session.options",
+  "requestId": "ctlreq_01J...",
+  "deviceId": "dev_01J...",
+  "controllerId": "ctl_01J...",
+  "payload": {}
+}
+```
+
+Device 分页调用 `model/list(includeHidden=false)`，只把规范化后的 `id/model/displayName/description/isDefault` 返回 PWA；PWA 不解析原始 app-server Model。批准等级固定为当前 Agent 支持的 `untrusted`、`on-request`、`never`，默认 `untrusted`。该请求要求 `view` 权限。
+
 历史列表请求：
 
 ```json
@@ -525,12 +558,14 @@ Device 先调用 `thread/read(includeTurns=false)` 读取元数据，再按 `sor
   "controllerId": "ctl_01J...",
   "payload": {
     "cwd": "D:\\Projects\\MES",
-    "text": "修复登录模块并运行测试"
+    "text": "修复登录模块并运行测试",
+    "model": "gpt-5.6-terra",
+    "approvalPolicy": "on-request"
   }
 }
 ```
 
-Device 串行执行 `thread/start -> turn/start`。`cwd` 必须是 Device 上存在的绝对目录，任务文本非空且不超过 20000 字符。
+Device 对该请求顺序执行 `thread/start -> turn/start`，并把同一 `model/approvalPolicy` 传给两步。`cwd` 必须是 Device 上存在的绝对目录，任务文本非空且不超过 20000 字符。`model` 可省略以使用 Codex 默认模型。
 
 恢复历史并启动后续 Turn：
 
@@ -542,12 +577,14 @@ Device 串行执行 `thread/start -> turn/start`。`cwd` 必须是 Device 上存
   "controllerId": "ctl_01J...",
   "payload": {
     "threadId": "thr_123",
-    "text": "继续处理剩余失败测试"
+    "text": "继续处理剩余失败测试",
+    "model": "gpt-5.6-sol",
+    "approvalPolicy": "untrusted"
   }
 }
 ```
 
-Device 串行执行 `thread/resume -> turn/start`。新建/恢复都要求 `steer` 权限，强制 `approvalPolicy=untrusted` 与 `sandbox=workspace-write`；若已有活动 Turn，返回 `TURN_ALREADY_ACTIVE`。
+Device 对该请求顺序执行 `thread/resume -> turn/start`。新建/恢复都要求 `steer` 权限，始终强制 `sandbox=workspace-write`；批准等级由 Controller 在上述三个允许值中选择，省略时使用 `untrusted`。同一 Thread 已有活动 Turn 时返回 `TURN_ALREADY_ACTIVE`，其他 Thread 的活动 Turn 不阻止新建或恢复。
 
 成功 `result`：
 
@@ -691,6 +728,8 @@ TURN_MISMATCH
 TURN_ALREADY_ACTIVE
 THREAD_NOT_FOUND
 THREAD_CONTROL_FAILED
+MODEL_INVALID
+APPROVAL_POLICY_INVALID
 PROJECT_PATH_INVALID
 PROJECT_NOT_FOUND
 RELAY_OFFLINE

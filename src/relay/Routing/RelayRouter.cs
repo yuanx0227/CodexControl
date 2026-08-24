@@ -247,6 +247,7 @@ public sealed class RelayRouter
             case RelayMessageTypes.ControlSteer:
             case RelayMessageTypes.ControlInterrupt:
             case RelayMessageTypes.ControlApproval:
+            case RelayMessageTypes.ControlSessionOptions:
             case RelayMessageTypes.ControlThreadList:
             case RelayMessageTypes.ControlThreadRead:
             case RelayMessageTypes.ControlThreadStart:
@@ -292,6 +293,7 @@ public sealed class RelayRouter
             RelayMessageTypes.ControlSteer => pairing.SteerPermission,
             RelayMessageTypes.ControlInterrupt => pairing.InterruptPermission,
             RelayMessageTypes.ControlApproval => pairing.ApprovalPermission,
+            RelayMessageTypes.ControlSessionOptions => pairing.ViewPermission,
             RelayMessageTypes.ControlThreadList => pairing.ViewPermission,
             RelayMessageTypes.ControlThreadRead => pairing.ViewPermission,
             RelayMessageTypes.ControlThreadStart => pairing.SteerPermission,

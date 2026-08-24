@@ -358,6 +358,7 @@ public sealed class RelayClient : IAsyncDisposable
                 case RelayMessageTypes.ControlSteer:
                 case RelayMessageTypes.ControlInterrupt:
                 case RelayMessageTypes.ControlApproval:
+                case RelayMessageTypes.ControlSessionOptions:
                 case RelayMessageTypes.ControlThreadList:
                 case RelayMessageTypes.ControlThreadRead:
                 case RelayMessageTypes.ControlThreadStart:
@@ -472,6 +473,13 @@ public sealed class RelayClient : IAsyncDisposable
                             cancellationToken).ConfigureAwait(false);
                         break;
                     }
+                case RelayMessageTypes.ControlSessionOptions:
+                    {
+                        _ = envelope.ReadPayload<SessionOptionsControlPayload>();
+                        result = await _dispatcher.GetSessionOptionsAsync(cancellationToken)
+                            .ConfigureAwait(false);
+                        break;
+                    }
                 case RelayMessageTypes.ControlThreadList:
                     {
                         var payload = envelope.ReadPayload<ThreadListControlPayload>();
@@ -495,6 +503,8 @@ public sealed class RelayClient : IAsyncDisposable
                         result = await _dispatcher.StartThreadAsync(
                             payload.Cwd,
                             payload.Text,
+                            payload.Model,
+                            payload.ApprovalPolicy,
                             cancellationToken).ConfigureAwait(false);
                         break;
                     }
@@ -504,6 +514,8 @@ public sealed class RelayClient : IAsyncDisposable
                         result = await _dispatcher.ResumeThreadAsync(
                             payload.ThreadId,
                             payload.Text,
+                            payload.Model,
+                            payload.ApprovalPolicy,
                             cancellationToken).ConfigureAwait(false);
                         break;
                     }
@@ -758,7 +770,20 @@ public sealed class RelayClient : IAsyncDisposable
         snapshot.PendingApprovalCount,
         snapshot.LastAgentMessage,
         snapshot.LastError,
-        typeof(RelayClient).Assembly.GetName().Version?.ToString(3));
+        typeof(RelayClient).Assembly.GetName().Version?.ToString(3),
+        snapshot.ActiveTurns.Select(static active => new CodexActiveTurnPayload(
+            active.ThreadId,
+            active.TurnId,
+            active.Status.ToString(),
+            active.StartedAt.ToUnixTimeMilliseconds(),
+            active.LastActivityAt.ToUnixTimeMilliseconds(),
+            active.CurrentProject,
+            active.CurrentActivity,
+            active.RunningCommand,
+            active.ChangedFiles,
+            active.PendingApprovalCount,
+            active.LastAgentMessage,
+            active.LastError)).ToArray());
 
     private static string NewRequestId() => string.Concat("req_", Guid.NewGuid().ToString("N"));
 }

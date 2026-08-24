@@ -228,14 +228,30 @@ internal static class RelayTestRunner
             [],
             0,
             null,
-            null);
+            null,
+            AgentVersion: "0.7.0-test",
+            ActiveTurns:
+            [
+                new CodexActiveTurnPayload(
+                    "thr-1", "turn-1", "Thinking",
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    "D:\\Projects\\MES", "Thinking", null, [], 0, null, null),
+                new CodexActiveTurnPayload(
+                    "thr-2", "turn-2", "RunningTests",
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    "D:\\Projects\\Vision", "Running tests", "dotnet test", [], 0, null, null),
+            ]);
         await device.SendAsync(RelayEnvelope.Create(
             RelayMessageTypes.CodexSnapshot,
             snapshot,
             deviceId: device.PrincipalId)).ConfigureAwait(false);
         var forwardedSnapshot = (await controller.ReceiveAsync(RelayMessageTypes.CodexSnapshot)
             .ConfigureAwait(false)).ReadPayload<CodexSnapshotPayload>();
-        Assert(forwardedSnapshot.Revision == 1, "snapshot should be forwarded");
+        Assert(
+            forwardedSnapshot.Revision == 1 && forwardedSnapshot.ActiveTurns?.Count == 2,
+            "snapshot and all active turns should be forwarded");
         var secondTabSnapshot = (await secondControllerTab.ReceiveAsync(RelayMessageTypes.CodexSnapshot)
             .ConfigureAwait(false)).ReadPayload<CodexSnapshotPayload>();
         Assert(secondTabSnapshot.Revision == 1, "snapshot should reach every tab for the controller identity");
@@ -263,10 +279,13 @@ internal static class RelayTestRunner
 
         foreach (var remoteSessionControl in new (string Type, object Payload)[]
                  {
-                      (RelayMessageTypes.ControlThreadList, new ThreadListControlPayload()),
-                      (RelayMessageTypes.ControlThreadRead, new ThreadReadControlPayload("thr-history")),
-                      (RelayMessageTypes.ControlThreadStart, new ThreadStartControlPayload("D:\\Projects\\MES", "new task")),
-                     (RelayMessageTypes.ControlThreadResume, new ThreadResumeControlPayload("thr-history", "continue task")),
+                     (RelayMessageTypes.ControlSessionOptions, new SessionOptionsControlPayload()),
+                     (RelayMessageTypes.ControlThreadList, new ThreadListControlPayload()),
+                     (RelayMessageTypes.ControlThreadRead, new ThreadReadControlPayload("thr-history")),
+                     (RelayMessageTypes.ControlThreadStart, new ThreadStartControlPayload(
+                         "D:\\Projects\\MES", "new task", "gpt-5.6-terra", "on-request")),
+                     (RelayMessageTypes.ControlThreadResume, new ThreadResumeControlPayload(
+                         "thr-history", "continue task", "gpt-5.6-sol", "untrusted")),
                  })
         {
             var sessionRequestId = RelayTestClient.NewRequestId();

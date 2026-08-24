@@ -17,11 +17,26 @@ public enum CodexActivityStatus
     Failed,
 }
 
+public sealed record CodexActiveTurnSnapshot(
+    string ThreadId,
+    string TurnId,
+    CodexActivityStatus Status,
+    DateTimeOffset StartedAt,
+    DateTimeOffset LastActivityAt,
+    string? CurrentProject,
+    string? CurrentActivity,
+    string? RunningCommand,
+    IReadOnlyList<string> ChangedFiles,
+    int PendingApprovalCount,
+    string? LastAgentMessage,
+    string? LastError);
+
 public sealed record CodexStateSnapshot(
     long Revision,
     CodexActivityStatus Status,
     string? ActiveThreadId,
     string? ActiveTurnId,
+    IReadOnlyList<CodexActiveTurnSnapshot> ActiveTurns,
     DateTimeOffset? StartedAt,
     DateTimeOffset LastActivityAt,
     string? CurrentProject,
@@ -39,6 +54,7 @@ public sealed record CodexStateSnapshot(
         Status: CodexActivityStatus.Offline,
         ActiveThreadId: null,
         ActiveTurnId: null,
+        ActiveTurns: [],
         StartedAt: null,
         LastActivityAt: DateTimeOffset.UtcNow,
         CurrentProject: null,

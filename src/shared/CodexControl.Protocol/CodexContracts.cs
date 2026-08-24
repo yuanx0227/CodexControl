@@ -75,6 +75,37 @@ public sealed record CodexThreadActionResultPayload(
     string ThreadId,
     string TurnId);
 
+public sealed record CodexModelOptionPayload(
+    string Id,
+    string Model,
+    string DisplayName,
+    string Description,
+    bool IsDefault);
+
+public sealed record CodexApprovalPolicyOptionPayload(
+    string Id,
+    string DisplayName,
+    string Description,
+    bool IsDefault);
+
+public sealed record CodexSessionOptionsPayload(
+    IReadOnlyList<CodexModelOptionPayload> Models,
+    IReadOnlyList<CodexApprovalPolicyOptionPayload> ApprovalPolicies);
+
+public sealed record CodexActiveTurnPayload(
+    string ThreadId,
+    string TurnId,
+    string Status,
+    long StartedAt,
+    long LastActivityAt,
+    string? CurrentProject,
+    string? CurrentActivity,
+    string? RunningCommand,
+    IReadOnlyList<string> ChangedFiles,
+    int PendingApprovalCount,
+    string? LastAgentMessage,
+    string? LastError);
+
 public sealed record CodexSnapshotPayload(
     long Revision,
     string Status,
@@ -89,7 +120,8 @@ public sealed record CodexSnapshotPayload(
     int PendingApprovalCount,
     string? LastAgentMessage,
     string? LastError,
-    string? AgentVersion = null);
+    string? AgentVersion = null,
+    IReadOnlyList<CodexActiveTurnPayload>? ActiveTurns = null);
 
 public sealed record CodexEventPayload(
     string EventId,

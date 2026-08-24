@@ -1,6 +1,6 @@
 # MVP 可行性与验收报告
 
-日期：2026-08-22（Asia/Shanghai）
+日期：2026-08-22（Asia/Shanghai）；最新复核：2026-08-24
 
 ## 1. 结论
 
@@ -34,7 +34,7 @@ Codex Event / Approval
 - Inno Setup 当前用户安装、两套 .NET 8 Runtime 检测、覆盖升级保留 `data\`、卸载默认删除；
 - 内部/测试安装包 `CodexControl-Setup-UNSIGNED.exe` 和 SHA-256 清单。
 
-当前增量证据：Agent 自动化 11 通过，Relay 自动化 7 通过，Playwright 32 通过，
+当前增量证据：Agent 自动化 11 通过，Relay 自动化 7 通过，Playwright 34 通过，
 真实 Codex 3 通过；本机静默安装、覆盖升级数据保留、Headless 输出和卸载删除通过。
 
 0.5.1 另外验证安全 GFM Markdown、本地图片缩略图与路径脱敏、历史/实时 Turn 耗时、
@@ -50,6 +50,10 @@ Codex Event / Approval
 
 0.6.0 撤销跨 app-server 状态推断和完整历史轮询：只有 Agent 托管 Thread 使用事件驱动实时状态；
 Desktop 原生 Thread 明确为外部只读。新增滚动锚点、运行/未读/完成未读标志与版本展示验证。
+
+0.7.0 增加当前 `model/list` 模型选择、三档批准等级、按 Thread 的 `activeTurns[]` 并发管理，
+并用乐观会话与有界重试消除新建首轮已启动但页面暂时报错的索引竞态。当前磁盘版本通过
+Agent 14/14（含真实 Codex 3 项）、Relay 7/7、Web build 和 Chromium/WebKit 34/34。
 
 仍未证明：独立 Windows 10 与 Windows 11 干净机矩阵、缺少 Runtime 时真实 UAC 补齐、
 真实手机扫码、正式签名/SmartScreen、生产域名/证书和企业网络。
@@ -80,7 +84,7 @@ Playwright: 1.62.1
 
 ```text
 codex-cli 0.149.0-alpha.4.1
-OpenAI.Codex_26.818.5229.0_x64
+OpenAI.Codex_26.818.5345.0_x64
 ```
 
 当前 TUI 在 `thread/start` 使用实验字段 `runtimeWorkspaceRoots`，因此 Agent 的 app-server 握手必须显式声明 `experimentalApi=true`。升级 Codex 后必须重新生成 Schema 并复跑真实 TUI/Turn 测试。
@@ -92,10 +96,13 @@ OpenAI.Codex_26.818.5229.0_x64
 ```text
 PASS JsonRpcProtocol
 PASS AgentOptions_SecureRelay
+PASS AgentSettings_AtomicRecovery
+PASS ThreadHistory_Markdown_Image_Timing_Summary
 PASS CodexStateManager
 PASS CodexDesktopRuntimeResolver
 PASS CodexExecutableProbe
 PASS AppServerBridge_LocalWsProxy
+PASS AgentRuntimeCoordinator_Lifecycle
 PASS RemoteControl_ApprovalArbitration
 PASS AgentRelay_DPAPI_Authentication_Pairing
 ```
@@ -103,7 +110,7 @@ PASS AgentRelay_DPAPI_Authentication_Pairing
 本机 Codex Desktop 兼容验证：
 
 ```text
-Desktop package: OpenAI.Codex_26.818.5229.0_x64__2p2nqsd0c76g0
+Desktop package: OpenAI.Codex_26.818.5345.0_x64__2p2nqsd0c76g0
 first launch: STAGED
 second launch: REUSED
 four runtime executable SHA-256 comparisons: PASS
@@ -152,7 +159,9 @@ thread/delete test-created thread
 
 ```text
 PASS Relay_Health_Migration
+PASS Relay_RegisteredDevice_ReconnectBurst
 PASS Relay_Auth_Pairing_Routing_Reconnect
+PASS Relay_PairingV2_Confirm_Permission_Revoke
 PASS Relay_Expiry_AttemptLimit_ChallengeReplay
 PASS Relay_OneController_ThreeDevices_Isolation
 PASS Relay_Persistence_NoPlaintextCode
@@ -191,7 +200,7 @@ PASS real Relay + browser Web Crypto + reload authentication recovery (Chromium 
 PASS iPhone WebKit pairing/control/PWA metadata
 ```
 
-总计 12 个浏览器用例通过（Chromium 6 + WebKit 6）。
+总计 34 个浏览器用例通过（Chromium 17 + WebKit 17）。
 
 真实系统测试不是 WebSocket Mock：Playwright 浏览器用 Web Crypto 生成不可导出私钥，Relay 实际验证 Pairing Proof 和 Auth Signature，真实路由 Control 到签名 Device 客户端。
 
@@ -251,7 +260,8 @@ SQLite volume 在 Relay restart 前后 SHA-256 一致，证明持久化 volume �
 | K 一个 Controller 三台 PC | PASS | Relay three-device pairing/list 测试 |
 | L 未配对 Controller 隔离 | PASS | zero-device isolation + permission test |
 | M 手机查看真实历史 | PASS | `thread/list.recencyAt`、项目/最近分区、能力探测与当前 Desktop cwd 兼容 + 浏览器/真实 Codex 测试 |
-| N 手机新建/恢复会话 | PASS | 项目内预填 cwd、`thread/start/resume -> turn/start` + 浏览器/真实 Codex 测试 |
+| N 手机新建/恢复会话 | PASS | 项目内预填 cwd、动态模型/批准等级、`thread/start/resume -> turn/start`、新建索引延迟恢复 + 浏览器/真实 Codex 测试 |
+| N2 多会话同时管理 | PASS | `activeTurns[]`、同 Thread 串行/跨 Thread 并发、分别 Steer/Interrupt + Agent/Playwright 测试 |
 | O Agent 自恢复 | PASS | app-server 子进程故障注入后 Agent PID 保持、proxy/Relay 自动恢复 |
 | P 实时回复 | PASS | `AgentMessageDelta` 合并、流式光标、Completed 收口与后台历史刷新测试 |
 
@@ -283,6 +293,12 @@ npm audit --audit-level=high: 0 vulnerabilities
 - Relay publish；
 - PWA/Deploy copy；
 - SHA256SUMS。
+
+2026-08-24 的 0.7.0 Release 使用独立 `out/release-0.7.0`，避免强杀仍在运行的旧 Agent；
+Release 编译、Chromium/WebKit 34/34、Agent 11 项确定性测试、Relay 7/7、Inno Setup、
+64 项 SHA-256 清单和 artifact Compose 静态校验均通过。真实 Codex 3 项另用当前
+`OpenAI.Codex_26.818.5345.0_x64` 完整 Runtime 执行并通过。NuGet 与 npm 当前漏洞检查为 0；
+本机 Docker Desktop 引擎未运行，因此 0.7.0 镜像构建和容器健康必须以目标 Linux 服务器证据为准。
 
 ## 11. 现场边界
 

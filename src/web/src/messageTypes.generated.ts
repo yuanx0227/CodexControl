@@ -34,6 +34,7 @@ export const MessageType = {
   controlSteer: 'control.steer',
   controlInterrupt: 'control.interrupt',
   controlApproval: 'control.approval',
+  controlSessionOptions: 'control.session.options',
   controlThreadList: 'control.thread.list',
   controlThreadRead: 'control.thread.read',
   controlThreadStart: 'control.thread.start',

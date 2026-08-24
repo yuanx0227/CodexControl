@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$SkipTests,
+    [string]$OutputRoot,
     [string]$InnoCompiler,
     [string]$SignToolCommand
 )
@@ -9,9 +10,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $workspace = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$outputRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace 'out\release'))
 $allowedOutputRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace 'out'))
-if (-not $outputRoot.StartsWith($allowedOutputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+$outputRoot = if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+    [System.IO.Path]::GetFullPath((Join-Path $allowedOutputRoot 'release'))
+}
+elseif ([System.IO.Path]::IsPathRooted($OutputRoot)) {
+    [System.IO.Path]::GetFullPath($OutputRoot)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path $workspace $OutputRoot))
+}
+$allowedOutputPrefix = $allowedOutputRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) +
+    [System.IO.Path]::DirectorySeparatorChar
+if ($outputRoot -eq $allowedOutputRoot -or
+    -not $outputRoot.StartsWith($allowedOutputPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing release output outside workspace out directory: $outputRoot"
 }
 
@@ -95,6 +107,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Relay publish failed.' }
 Copy-Item -Recurse -LiteralPath (Join-Path $webRoot 'dist') -Destination (Join-Path $outputRoot 'web')
 $deployOutput = Join-Path $outputRoot 'deploy'
 Copy-Item -Recurse -LiteralPath (Join-Path $workspace 'deploy') -Destination $deployOutput
+Copy-Item -LiteralPath (Join-Path $webRoot 'nginx.conf') -Destination (Join-Path $deployOutput 'web-nginx.conf')
 Get-ChildItem -Recurse -File -LiteralPath $deployOutput -Filter '*.pem' | Remove-Item -Force
 
 $installerOutput = Join-Path $outputRoot 'installer'
@@ -117,7 +130,7 @@ $installerBaseName = 'CodexControl-Setup-UNSIGNED'
 $innoArguments = @(
     "/DSourceRoot=$agentOutput",
     "/DOutputRoot=$installerOutput",
-    '/DAppVersion=0.6.0',
+    '/DAppVersion=0.7.0',
     "/DOutputBaseName=$installerBaseName"
 )
 if (-not [string]::IsNullOrWhiteSpace($SignToolCommand)) {

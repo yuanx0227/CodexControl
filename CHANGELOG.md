@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 - 2026-08-24
+
+- Added live model selection from app-server `model/list` and explicit `untrusted` / `on-request` / `never` approval policy selection while retaining `workspace-write`.
+- Replaced the single global active Turn with per-Thread active state so different sessions can be monitored, steered, interrupted, and started concurrently.
+- Kept newly created Threads visible immediately and retried bounded history reads while app-server indexing catches up, avoiding the false first-send error that disappeared after refresh.
+
 ## 0.6.0 - 2026-08-23
 
 - Removed periodic full `control.thread.read` polling. Agent-managed sessions now update through app-server Domain Events over Relay WebSocket; completion performs one bounded reconciliation read.

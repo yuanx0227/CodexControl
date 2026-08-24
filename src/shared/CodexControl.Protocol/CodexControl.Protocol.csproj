@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>CodexControl.Protocol</RootNamespace>
-    <Version>0.6.0</Version>
+    <Version>0.7.0</Version>
     <AssemblyName>CodexControl.Protocol</AssemblyName>
     <Description>Shared Relay protocol contracts for Codex Control.</Description>
   </PropertyGroup>

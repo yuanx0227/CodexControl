@@ -19,14 +19,14 @@ MVP 代码与自动化闭环已经实现：
 - app-server stdio JSON-RPC 与 localhost WebSocket Proxy；
 - 真实 `codex --remote` TUI；
 - Thread/Turn/Item/Approval 状态、AgentMessage Delta 与 Domain Event；
-- 真实 `thread/list` 历史、`recencyAt` 任务顺序、项目/最近分区、能力探测式历史读取、项目内新建 Thread、恢复历史 Thread 并启动真实 Turn；
+- 真实 `thread/list` 历史、`recencyAt` 任务顺序、项目/最近分区、能力探测式历史读取、动态模型/批准等级、项目内新建 Thread、恢复历史 Thread 并启动真实 Turn；
 - Steer、Interrupt、Command/File Approval first-valid-response-wins；
 - Windows DPAPI + ECDSA P-256 Device Identity；
 - Controller Web Crypto + IndexedDB 非导出私钥；
 - 六位码、三分钟 TTL、五次证明失败限制、一次性销毁；
 - Challenge/Signature 长期认证与 replay 防护；
 - Relay WSS、SQLite/EF Core Migration、Presence、Snapshot Cache、权限与审计元数据；
-- React/Vite PWA：配对、设备列表、同身份多标签稳定连接、Desktop 风格项目/最近侧栏、实时打字机回复、项目内新建、固定 Composer、Steer、Interrupt、Approval、解除配对；
+- React/Vite PWA：配对、设备列表、同身份多标签稳定连接、Desktop 风格项目/最近侧栏、多活动 Thread 切换、模型/批准等级选择、实时回复、项目内新建、固定 Composer、Steer、Interrupt、Approval、解除配对；
 - 聊天正文安全解析 GFM Markdown，显示受控本地图片缩略图、Turn 耗时和默认折叠过程摘要；
 - ChatGPT 风格的信息架构：桌面会话侧栏、中央消息流、底部上下文输入框和移动端抽屉；
 - Docker Compose、nginx HTTPS/WSS、SQLite volume；
@@ -98,7 +98,7 @@ npm run dev
 Headless 兼容入口为 `CodexControlAgent.exe --headless [options]`。生产使用可信 HTTPS/WSS；
 明文 HTTP/WS 只允许 localhost/loopback 开发。
 
-配对后无需先打开本地 TUI：手机设备详情会直接读取电脑的 Codex 历史。项目优先使用公开 `project/list/projectId`，当前 Desktop 未持久化项目时以真实工作目录兼容分组；Codex 自动生成的日期会话目录放到“最近”，不显示“＋”。任务按 `recencyAt` 排序。由 Agent 创建或恢复的会话通过 Domain Events 实时合并 AgentMessage Delta，显示运行、未读和完成未读状态；完成时只做一次有界历史核对。Desktop 原生会话明确显示为外部只读会话，不轮询或伪造实时状态。
+配对后无需先打开本地 TUI：手机设备详情会直接读取电脑的 Codex 历史和当前 `model/list`。项目优先使用公开 `project/list/projectId`，当前 Desktop 未持久化项目时以真实工作目录兼容分组；Codex 自动生成的日期会话目录放到“最近”，不显示“＋”。任务按 `recencyAt` 排序。由 Agent 创建或恢复的多个 Thread 可同时运行并分别 Steer/Interrupt/Approval；Domain Events 实时合并 AgentMessage Delta，显示运行、未读和完成未读状态，完成时只做一次有界历史核对。Desktop 原生会话明确显示为外部只读会话，不轮询或伪造实时状态。
 
 ## Docker 部署
 
@@ -108,6 +108,10 @@ Copy-Item '.env.example' '.env'
 # 编辑 .env，设置随机 Pairing Secret、正式 Origin 和端口
 docker compose up -d --build
 ```
+
+正式发布优先使用 `tools/Build-Release.ps1` 生成的 `out/release/relay`、`web` 和 `deploy`，
+再通过 `deploy/docker-compose.artifacts.yml` 构建制品镜像。生产 `.env`、TLS 证书和 SQLite
+named volume 必须在版本目录之外保留或从上一版本受控复制，不能进入 Git 或发布压缩包。
 
 生产证书通过部署 Secret 提供到：
 

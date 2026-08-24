@@ -93,9 +93,10 @@ approval
 
 - `control.thread.list` 与 `control.thread.read` 必须具有 `view`；
 - `control.thread.start` 与 `control.thread.resume` 必须具有 `steer`；
+- `control.session.options` 必须具有 `view`，且只返回 Agent 规范化后的模型/批准选项；
 - 新会话目录必须是 Device 上真实存在的绝对路径；
-- 创建/恢复强制 `approvalPolicy=untrusted` 与 `workspace-write` sandbox；
-- 活动 Turn 存在时拒绝创建或恢复另一会话；
+- 创建/恢复强制 `workspace-write` sandbox；批准等级只允许 `untrusted/on-request/never`，省略时为 `untrusted`；
+- 同一 Thread 已有活动 Turn 时拒绝重复恢复；不同 Thread 可同时活动，并分别 Steer/Interrupt/Approval；
 - Relay 只实时转发历史摘要、任务文本、Turn 时间和有界图片缩略图，不持久化其正文或图片；
 - PWA 已读回执只保存 Thread ID、活动时间、状态和已读时间，不保存新的正文副本；
 - `localImage` 必须是本机绝对路径、允许的图片扩展和受限文件/像素大小；DTO 不下发绝对路径；
@@ -182,7 +183,7 @@ Relay 使用结构化框架日志；EF 参数默认不输出值。生产应设�
 - 重复/冲突 Control Request ID；
 - Device 伪造 Control Result；
 - 未授权历史读取/Thread 创建/Thread 恢复；
-- 活动 Turn 并发创建拒绝；
+- 同一 Thread 的重复活动 Turn 拒绝、不同 Thread 并发允许；
 - 本机项目路径不存在时失败关闭；
 - WebSocket Origin 拒绝；
 - 第二 TUI 拒绝；

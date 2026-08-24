@@ -7,13 +7,16 @@ import {
   removePairedDevice,
   sign,
 } from './controllerIdentity';
+import packageJson from '../package.json';
 import {
   MessageType,
   createEnvelope,
   type ApprovalRequested,
   type AuthChallenge,
   type AuthOk,
+  type CodexApprovalPolicy,
   type CodexEvent,
+  type CodexSessionOptions,
   type CodexSnapshot,
   type CodexThreadActionResult,
   type CodexThreadListResult,
@@ -218,22 +221,45 @@ export class RelayClient {
     return result.result;
   }
 
-  async startThread(deviceId: string, cwd: string, text: string): Promise<CodexThreadActionResult> {
+  async getSessionOptions(deviceId: string): Promise<CodexSessionOptions> {
+    const result = await this.readControl<CodexSessionOptions>(
+      MessageType.controlSessionOptions,
+      deviceId,
+      {},
+      45_000,
+    );
+    if (!result.result) throw new Error('Agent 未返回会话选项');
+    return result.result;
+  }
+
+  async startThread(
+    deviceId: string,
+    cwd: string,
+    text: string,
+    model: string | undefined,
+    approvalPolicy: CodexApprovalPolicy,
+  ): Promise<CodexThreadActionResult> {
     const result = await this.control<CodexThreadActionResult>(
       MessageType.controlThreadStart,
       deviceId,
-      { cwd, text },
+      { cwd, text, model, approvalPolicy },
       45_000,
     );
     if (!result.result) throw new Error('Agent 未返回新会话 ID');
     return result.result;
   }
 
-  async resumeThread(deviceId: string, threadId: string, text: string): Promise<CodexThreadActionResult> {
+  async resumeThread(
+    deviceId: string,
+    threadId: string,
+    text: string,
+    model: string | undefined,
+    approvalPolicy: CodexApprovalPolicy,
+  ): Promise<CodexThreadActionResult> {
     const result = await this.control<CodexThreadActionResult>(
       MessageType.controlThreadResume,
       deviceId,
-      { threadId, text },
+      { threadId, text, model, approvalPolicy },
       45_000,
     );
     if (!result.result) throw new Error('Agent 未返回恢复后的会话 ID');
@@ -294,7 +320,7 @@ export class RelayClient {
     this.send(
       createEnvelope(
         MessageType.authHello,
-        { role: 'controller', principalId: identity.controllerId, clientVersion: '0.6.0' },
+        { role: 'controller', principalId: identity.controllerId, clientVersion: packageJson.version },
         { requestId: this.authRequestId, controllerId: identity.controllerId },
       ),
     );

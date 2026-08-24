@@ -64,14 +64,21 @@ internal static class DomainEventNormalizer
             _ => JsonSerializer.SerializeToElement(new { }, RelayJson.Options),
         };
 
+        var threadId = FindString(message, "params", "threadId") ??
+                       FindString(message, "params", "thread", "id") ??
+                       snapshot.ActiveThreadId;
+        var turnId = FindString(message, "params", "turn", "id") ??
+                     FindString(message, "params", "turnId") ??
+                     FindString(message, "params", "item", "turnId") ??
+                     snapshot.ActiveTurns.FirstOrDefault(value => value.ThreadId == threadId)?.TurnId ??
+                     (threadId == snapshot.ActiveThreadId ? snapshot.ActiveTurnId : null);
+
         return new CodexEventPayload(
             string.Concat("evt_", Guid.NewGuid().ToString("N")),
             snapshot.Revision,
             kind,
-            FindString(message, "params", "threadId") ?? snapshot.ActiveThreadId,
-            FindString(message, "params", "turn", "id") ??
-            FindString(message, "params", "turnId") ??
-            snapshot.ActiveTurnId,
+            threadId,
+            turnId,
             FindString(message, "params", "item", "id") ?? FindString(message, "params", "itemId"),
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             data);

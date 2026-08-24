@@ -18,7 +18,7 @@ Codex Control 是 Codex Session 的控制面，不是 OpenAI 身份或模型代�
 它不负责：
 
 - 读取、迁移或托管 OpenAI API Key；
-- 修改用户的 Model Provider、Model 或 Endpoint；
+- 修改用户持久化的 Model Provider、默认 Model 或 Endpoint；远程 Turn 只从 `model/list` 选择本次模型；
 - 抓取 UI、OCR、模拟输入或 Hook 私有函数；
 - 附加到 Codex Desktop 已经创建的当前会话；
 - 在 Relay 保存完整代码、Prompt、Response、Shell Output 或 Diff。
@@ -117,7 +117,7 @@ Snapshot 是不可变对象并带单调 `revision`。Domain Event 只包含移�
 - 当前 `activeTurnId`；
 - `expectedTurnId`；
 - 新 Thread 的本机绝对 `cwd` 是否存在；
-- 创建/恢复会话时是否已有其他活动 Turn；
+- 创建/恢复会话时同一 Thread 是否已有活动 Turn；不同 Thread 允许并行；
 - Approval ID 与 Decision；
 - app-server RPC 错误/超时。
 
@@ -134,7 +134,7 @@ Snapshot 是不可变对象并带单调 `revision`。Domain Event 只包含移�
 恢复: control.thread.resume -> thread/resume -> turn/start
 ```
 
-历史列表与历史消息读取使用 `view` 权限；创建/恢复使用 `steer` 权限。远程创建/恢复强制 `approvalPolicy=untrusted` 与 `sandbox=workspace-write`，且同一 Agent 同时只允许一个远程活动 Turn。PWA 按规范化 `cwd` 分组，历史正文只在选中 Thread 时按需读取。
+历史列表、历史消息和会话选项读取使用 `view` 权限；创建/恢复使用 `steer` 权限。远程创建/恢复始终使用 `sandbox=workspace-write`，模型来自 Agent 规范化后的 `model/list`，批准等级限定为 `untrusted/on-request/never` 且默认 `untrusted`。同一 Thread 同时只允许一个活动 Turn，不同 Thread 可并行；PWA 按规范化 `cwd` 分组，历史正文只在选中 Thread 时按需读取。
 
 Interrupt RPC 成功只表示接受请求。UI 只有收到 `turn/completed status=interrupted` 后才显示 Interrupted。
 
@@ -253,6 +253,8 @@ Relay 不持久化完整事件流，只保存最新 Snapshot 和必要审计元�
 - Snapshot 恢复；
 - 活动时间线；
 - 真实历史会话列表；
+- 动态模型与批准等级选择，运行中修改只在下一次 Turn 生效；
+- 多个 Agent 托管 Thread 的独立运行、Steer、Interrupt 与 Approval；
 - 新建会话并启动首个 Turn；
 - 恢复历史会话并启动后续 Turn；
 - Steer；

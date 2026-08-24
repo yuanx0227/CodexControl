@@ -407,6 +407,33 @@ internal static class TestRunner
             {"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"interrupted"}}}
             """);
         Assert(state.Snapshot.Status == CodexActivityStatus.Interrupted, "terminal interrupted event is authoritative");
+
+        Apply(state, """
+            {"method":"turn/started","params":{"threadId":"thr-a","turn":{"id":"turn-a"}}}
+            """);
+        Apply(state, """
+            {"method":"turn/started","params":{"threadId":"thr-b","turn":{"id":"turn-b"}}}
+            """);
+        Assert(state.Snapshot.ActiveTurns.Count == 2, "two threads should remain independently active");
+        Apply(state, """
+            {"method":"item/started","params":{"threadId":"thr-a","turnId":"turn-a","item":{"type":"commandExecution","command":"dotnet test"}}}
+            """);
+        Assert(
+            state.Snapshot.ActiveTurns.Single(turn => turn.ThreadId == "thr-a").Status ==
+            CodexActivityStatus.RunningTests,
+            "thread-scoped activity should not overwrite the other active turn");
+        Apply(state, """
+            {"method":"turn/completed","params":{"threadId":"thr-a","turn":{"id":"turn-a","status":"completed"}}}
+            """);
+        Assert(
+            state.Snapshot.ActiveTurns.Count == 1 &&
+            state.Snapshot.ActiveThreadId == "thr-b" &&
+            state.Snapshot.ActiveTurnId == "turn-b",
+            "completing one thread should leave the other thread active");
+        Apply(state, """
+            {"method":"turn/completed","params":{"threadId":"thr-b","turn":{"id":"turn-b","status":"completed"}}}
+            """);
+        Assert(state.Snapshot.ActiveTurns.Count == 0, "all active turns should clear independently");
         return Task.CompletedTask;
     }
 
@@ -591,6 +618,17 @@ internal static class TestRunner
             Assert(
                 bridge.InitializeResult.GetProperty("platformOs").GetString() == "windows",
                 "real app-server should report windows");
+            var dispatcher = new RemoteControlDispatcher(bridge, state);
+            var sessionOptions = await dispatcher.GetSessionOptionsAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+            var sessionOptionsResult = sessionOptions.Result ??
+                                       throw new InvalidOperationException("real session options result is missing");
+            var sessionOptionsPayload = sessionOptionsResult.Deserialize<CodexSessionOptionsPayload>(
+                                            RelayJson.Options) ??
+                                        throw new InvalidOperationException("real session options should deserialize");
+            Assert(
+                sessionOptions.Succeeded && sessionOptionsPayload.Models.Count > 0,
+                "real model/list should provide at least one selectable model");
 
             using var client = new ClientWebSocket();
             await client.ConnectAsync(proxy.WebSocketUri, CancellationToken.None).ConfigureAwait(false);
@@ -1013,6 +1051,21 @@ internal static class TestRunner
             await bridge.StartAsync(CancellationToken.None).ConfigureAwait(false);
             var dispatcher = new RemoteControlDispatcher(bridge, state);
 
+            var sessionOptions = await dispatcher.GetSessionOptionsAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+            var sessionOptionsResult = sessionOptions.Result ??
+                                       throw new InvalidOperationException("session options result is missing");
+            var sessionOptionsPayload = sessionOptionsResult.Deserialize<CodexSessionOptionsPayload>(
+                                            RelayJson.Options) ??
+                                        throw new InvalidOperationException("session options should deserialize");
+            Assert(
+                sessionOptions.Succeeded &&
+                sessionOptionsPayload.Models.Count == 2 &&
+                sessionOptionsPayload.Models.Single(model => model.IsDefault).Model == "gpt-5.6-sol" &&
+                sessionOptionsPayload.ApprovalPolicies.Select(option => option.Id)
+                    .SequenceEqual(["untrusted", "on-request", "never"]),
+                "session options should map model/list and the supported approval policies");
+
             Apply(state, """
                 {"method":"turn/started","params":{"threadId":"thr-1","turn":{"id":"turn-1"}}}
                 """);
@@ -1086,9 +1139,21 @@ internal static class TestRunner
                 legacyThreadReadPayload.Entries[1].Role == "assistant",
                 "unsupported thread/items/list should fall back to bounded legacy thread/read");
 
+            Apply(state, """
+                {"method":"turn/started","params":{"threadId":"thr-concurrent","turn":{"id":"turn-concurrent"}}}
+                """);
+            var duplicateResume = await dispatcher.ResumeThreadAsync(
+                "thr-concurrent",
+                "should be rejected",
+                CancellationToken.None).ConfigureAwait(false);
+            Assert(
+                !duplicateResume.Succeeded && duplicateResume.ErrorCode == "TURN_ALREADY_ACTIVE",
+                "the same thread must still reject a second active turn");
             var created = await dispatcher.StartThreadAsync(
                 testRoot,
                 "start a real remote task",
+                "gpt-5.6-terra",
+                "on-request",
                 CancellationToken.None).ConfigureAwait(false);
             Assert(created.Succeeded && created.Result is not null, "remote thread creation should start a turn");
             var createdResult = created.Result ?? throw new InvalidOperationException("created result is missing");
@@ -1097,8 +1162,14 @@ internal static class TestRunner
             Assert(
                 createdPayload.ThreadId == "thr-created" && createdPayload.TurnId == "turn-created",
                 "thread/start and turn/start IDs should be returned");
+            Assert(
+                state.Snapshot.ActiveTurns.Any(turn => turn.ThreadId == "thr-concurrent"),
+                "starting a second thread must not evict or reject another active turn");
+            Apply(state, """
+                {"method":"turn/completed","params":{"threadId":"thr-concurrent","turn":{"id":"turn-concurrent","status":"completed"}}}
+                """);
             await WaitUntilAsync(
-                () => state.Snapshot.ActiveTurnId is null,
+                () => state.Snapshot.ActiveTurns.Count == 0,
                 TestTimeout).ConfigureAwait(false);
 
             var resumed = await dispatcher.ResumeThreadAsync(

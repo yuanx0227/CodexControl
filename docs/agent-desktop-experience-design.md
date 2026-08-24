@@ -55,7 +55,7 @@
 - 生产 Relay 只使用 HTTPS/WSS，非 TLS 仅限 loopback 开发；
 - Device 私钥继续使用 Current User DPAPI；
 - Controller 私钥继续使用不可导出的 IndexedDB `CryptoKey`；
-- 远程创建/恢复仍强制 `approvalPolicy=untrusted` 和 `workspace-write`；
+- 远程创建/恢复仍强制 `workspace-write`；模型来自 `model/list`，批准等级限定为 `untrusted/on-request/never` 并默认 `untrusted`；
 - Approval 仍为显式 first-valid-response-wins，绝不自动批准；
 - Relay 和 PWA 不解析或持久化原始 app-server Thread/JSON-RPC；
 - Relay 不持久化完整 Prompt、回复、Shell Output、Diff 或源码；
@@ -895,6 +895,8 @@ device.ready
 - 多台时恢复上次使用的电脑；
 - 保留明显“切换电脑”入口；
 - 上次电脑离线时仍进入其工作区并显示等待重连；
+- Composer 从 Agent 的 `model/list` 加载模型并提供 `untrusted/on-request/never` 批准等级；活动 Turn 中修改只对下一次 Turn 生效；
+- 同一 Thread 只允许一个活动 Turn，不同 Thread 可同时运行并分别 Steer、Interrupt 和 Approval；
 - 不改变现有项目/最近分区和 Thread 读取语义。
 
 ### 13.4 浏览器持久化
@@ -1135,6 +1137,7 @@ device.ready
 - Relay 切换失败保留原配置；
 - 浏览器 reload 后身份认证恢复；
 - Chromium/Android profile 和 WebKit/iPhone profile；
+- 模型/批准等级透传、多活动 Thread 切换和新 Thread 索引延迟恢复；
 - 现有项目/最近分区、历史、Steer、Interrupt 和 Approval 无回归。
 
 ### 19.4 安装器

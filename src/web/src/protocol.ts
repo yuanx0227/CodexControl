@@ -53,6 +53,22 @@ export interface CodexSnapshot {
   lastAgentMessage?: string;
   lastError?: string;
   agentVersion?: string;
+  activeTurns?: CodexActiveTurn[];
+}
+
+export interface CodexActiveTurn {
+  threadId: string;
+  turnId: string;
+  status: string;
+  startedAt: number;
+  lastActivityAt: number;
+  currentProject?: string;
+  currentActivity?: string;
+  runningCommand?: string;
+  changedFiles: string[];
+  pendingApprovalCount: number;
+  lastAgentMessage?: string;
+  lastError?: string;
 }
 
 export interface DeviceSummary {
@@ -137,6 +153,28 @@ export interface CodexThreadReadResult {
 export interface CodexThreadActionResult {
   threadId: string;
   turnId: string;
+}
+
+export type CodexApprovalPolicy = 'untrusted' | 'on-request' | 'never';
+
+export interface CodexModelOption {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+}
+
+export interface CodexApprovalPolicyOption {
+  id: CodexApprovalPolicy;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+}
+
+export interface CodexSessionOptions {
+  models: CodexModelOption[];
+  approvalPolicies: CodexApprovalPolicyOption[];
 }
 
 export interface CodexEvent {

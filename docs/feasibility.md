@@ -55,6 +55,21 @@ Desktop 原生 Thread 明确为外部只读。新增滚动锚点、运行/未读
 并用乐观会话与有界重试消除新建首轮已启动但页面暂时报错的索引竞态。当前磁盘版本通过
 Agent 14/14（含真实 Codex 3 项）、Relay 7/7、Web build 和 Chromium/WebKit 34/34。
 
+### 1.2 2026-08-24 服务器部署复核
+
+- 源码提交 `3ad49c7bf8e22babd74ca70da2fb28a84da0ad59` 已推送，0.7.0 Release 的 Agent
+  `ProductVersion` 包含同一提交，64 项 `SHA256SUMS` 全部通过；
+- 服务器不可变目录为 `/opt/codex-control/releases/0.7.0-3ad49c7`，`current` 已原子切换；
+- Relay/Web 镜像为 `codex-control-relay:0.7.0` 与 `codex-control-web:0.7.0`，三容器运行，
+  Relay/Web healthy；SQLite 继续使用 `codex-control_relay-data`，数据库文件仍由 UID 10001 持有；
+- HTTPS `/healthz` 返回 `status=ok, protocolVersion=2`，HTTP 跳转 HTTPS；Let’s Encrypt 证书
+  有效期截至 2026-08-29 03:22:02 UTC；
+- 公网 Playwright 加载标题、0.7.0 版本、全部静态资源和受控 Service Worker `codex-control-v13`，
+  控制台 0 错误/0 警告，独立 `wss://49.235.119.216/ws/controller` 握手成功；
+- 原 0.6.0 目录完整保留作为回滚点。目标机 Debian 镜像源下载超时，因此 Relay 最终复用已验证的
+  `codex-control-relay:base-v054`（非 root UID 10001、ASP.NET Core/.NET 8.0.30、curl），只覆盖
+  清单校验通过的 0.7.0 Relay 制品；未把该现场优化冒充为通用 Dockerfile 构建证据。
+
 仍未证明：独立 Windows 10 与 Windows 11 干净机矩阵、缺少 Runtime 时真实 UAC 补齐、
 真实手机扫码、正式签名/SmartScreen、生产域名/证书和企业网络。
 
@@ -238,6 +253,9 @@ WSS /ws/controller: Open
 ```
 
 SQLite volume 在 Relay restart 前后 SHA-256 一致，证明持久化 volume 生效。
+
+0.7.0 的目标 Linux 服务器镜像构建、Compose 重建、HTTPS/WSS 与 volume 复用证据见 1.2；
+它证明本次服务器部署成功，不替代真实手机配对或多电脑并发现场验收。
 
 本地使用自签名证书，仅诊断客户端跳过证书校验；产品 Agent/PWA 未加入证书绕过。
 

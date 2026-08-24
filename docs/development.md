@@ -161,6 +161,10 @@ Agent/便携版的运行数据统一位于 `CodexControlAgent.exe` 同目录 `da
      up -d --build --remove-orphans
    ```
 
+   若镜像已单独构建并核对 tag/digest，切流时改用 `up -d --no-build --remove-orphans`，避免
+   切流阶段再次访问外部软件源。现场临时 Dockerfile 只能基于已核验的同框架、同 UID 基础镜像，
+   并必须在验收报告中明确记录，不能反向覆盖仓库中的通用 Dockerfile。
+
 5. Relay/Web healthy 且 HTTPS `/healthz`、PWA、Service Worker 和 WSS 握手通过后，原子切换
    `/opt/codex-control/current`。失败时恢复旧 symlink，并用旧版本的同一 Compose project name
    重新执行 `up -d`；保留旧版本目录和 named volume，不执行 `down -v`。

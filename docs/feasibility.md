@@ -63,7 +63,8 @@ Agent 14/14（含真实 Codex 3 项）、Relay 7/7、Web build 和 Chromium/WebK
 - Relay/Web 镜像为 `codex-control-relay:0.7.0` 与 `codex-control-web:0.7.0`，三容器运行，
   Relay/Web healthy；SQLite 继续使用 `codex-control_relay-data`，数据库文件仍由 UID 10001 持有；
 - HTTPS `/healthz` 返回 `status=ok, protocolVersion=2`，HTTP 跳转 HTTPS；Let’s Encrypt 证书
-  有效期截至 2026-08-29 03:22:02 UTC；
+  有效期截至 2026-08-29 03:22:02 UTC；`snap.certbot.renew.timer` 已启用，pre/deploy/post hook
+  会停止 gateway、复制到 `current/deploy/certs` 并以同一 Compose project 无构建恢复 gateway；
 - 公网 Playwright 加载标题、0.7.0 版本、全部静态资源和受控 Service Worker `codex-control-v13`，
   控制台 0 错误/0 警告，独立 `wss://49.235.119.216/ws/controller` 握手成功；
 - 原 0.6.0 目录完整保留作为回滚点。目标机 Debian 镜像源下载超时，因此 Relay 最终复用已验证的

@@ -168,6 +168,9 @@ Agent/便携版的运行数据统一位于 `CodexControlAgent.exe` 同目录 `da
 5. Relay/Web healthy 且 HTTPS `/healthz`、PWA、Service Worker 和 WSS 握手通过后，原子切换
    `/opt/codex-control/current`。失败时恢复旧 symlink，并用旧版本的同一 Compose project name
    重新执行 `up -d`；保留旧版本目录和 named volume，不执行 `down -v`。
+6. 若 TLS 由 Certbot 自动续期，renewal hook 必须通过稳定的
+   `/opt/codex-control/current/deploy` 定位 `.env` 和 `certs/`，复制证书后用
+   `up -d --no-build --pull never gateway` 恢复网关；每次改变 release 目录结构都要复核 hook。
 
 ## Evidence boundary
 

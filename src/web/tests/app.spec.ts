@@ -394,6 +394,13 @@ async function installRelayMock(page: Page, options: {
 
   return {
     captured,
+    sendDomainEvent(kind: string, data: Record<string, unknown>, threadId = 'thr-1', turnId = 'turn-1', itemId?: string) {
+      if (!route) throw new Error('WebSocket mock is not connected');
+      route.send(JSON.stringify(reply('codex.event', undefined, {
+        eventId: `evt-sync-${crypto.randomUUID()}`, revision: 20, kind, threadId, turnId, itemId,
+        occurredAt: Date.now(), data,
+      }, deviceId)));
+    },
     getConnectionCount: () => connectionCount,
     sendApproval() {
       if (!route) throw new Error('WebSocket mock is not connected');
@@ -653,6 +660,35 @@ test('uses pushed events without polling the full active history', async ({ page
   expect(relay.captured.filter((message) => message.type === 'control.thread.read')).toHaveLength(initialReadCount);
   relay.sendAgentDelta('事件推送的过程更新');
   await expect(page.getByText('事件推送的过程更新', { exact: true })).toBeVisible();
+});
+
+test('session sync shows live user input and keeps repeated messages in different turns', async ({ page }) => {
+  const relay = await installRelayMock(page);
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+  relay.sendDomainEvent('UserMessageCompleted', { text: '来自另一端的消息' }, 'thr-1', 'turn-1', 'user-sync');
+  relay.sendDomainEvent('UserMessageCompleted', { text: '来自另一端的消息' }, 'thr-1', 'turn-1', 'user-sync');
+  await expect(page.getByText('来自另一端的消息', { exact: true })).toHaveCount(1);
+  relay.sendDomainEvent('UserMessageCompleted', { text: '来自另一端的消息' }, 'thr-1', 'turn-2', 'user-sync');
+  await expect(page.getByText('来自另一端的消息', { exact: true })).toHaveCount(2);
+  relay.sendAgentDelta('第一段', 'shared-item');
+  relay.sendAgentDelta('其他会话', 'shared-item', 'thr-history-1');
+  relay.sendAgentDelta('第二段', 'shared-item');
+  await expect(page.getByText('第一段第二段', { exact: true })).toBeVisible();
+  await expect(page.getByText('第一段其他会话第二段', { exact: true })).toHaveCount(0);
+});
+
+test('session sync reconciles status notifications without reentering the conversation', async ({ page }) => {
+  const relay = await installRelayMock(page);
+  await pair(page);
+  await page.getByRole('button', { name: '打开 DEV-PC-01' }).click();
+  relay.sendDomainEvent('ThreadStatusChanged', { status: 'active', activeFlags: ['waitingOnUserInput'] });
+  await expect(page.locator('.chat-header .status-pill')).toHaveText('等待输入');
+  relay.sendDomainEvent('ThreadStatusChanged', { status: 'active', activeFlags: ['waitingOnApproval'] });
+  await expect(page.locator('.chat-header .status-pill')).toHaveText('等待审批');
+  relay.sendDomainEvent('ThreadStatusChanged', { status: 'idle', activeFlags: [] });
+  await expect(page.getByRole('button', { name: '停止当前任务' })).toBeDisabled();
+  await expect(page.locator('.chat-header .status-pill')).toHaveText('Agent 就绪');
 });
 
 test('marks Desktop-owned history as external and never polls it', async ({ page }) => {

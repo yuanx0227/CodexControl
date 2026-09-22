@@ -464,7 +464,7 @@ function DeviceWorkspace({
   const lastRefreshedCompletion = useRef<string | undefined>(undefined);
   const optimisticThreadIds = useRef(new Set<string>());
   const snapshot = device.snapshot;
-  const activeTurns = useMemo(() => activeTurnsForSnapshot(snapshot), [snapshot]);
+  const activeTurns = useMemo(() => reconcileActiveTurns(snapshot, events), [snapshot, events]);
   const activeTurnByThread = useMemo(
     () => new Map(activeTurns.map((turn) => [turn.threadId, turn])),
     [activeTurns],
@@ -530,7 +530,7 @@ function DeviceWorkspace({
       setThreadHistory(undefined);
       setThreadHistoryError(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      if (!background && request === threadHistoryRequest.current) setThreadHistoryLoading(false);
+      if (request === threadHistoryRequest.current) setThreadHistoryLoading(false);
     }
   }, [client, device.deviceId]);
 
@@ -615,19 +615,22 @@ function DeviceWorkspace({
   useEffect(() => {
     setThreadActivities((current) => {
       let next = current;
-      const seen = new Set<string>();
-      for (const event of events) {
-        if (!event.threadId || seen.has(event.threadId)) continue;
-        seen.add(event.threadId);
+      for (const event of [...events].reverse()) {
+        if (!event.threadId) continue;
         const existing = next[event.threadId];
         if (existing && existing.latestAt > event.occurredAt) continue;
-        const status = event.kind === 'TurnStarted'
+        const status = event.kind === 'ThreadStatusChanged'
+          ? readEventStatus(event) === 'active' ? 'running'
+            : readEventStatus(event) === 'systemError' ? 'failed'
+              : existing?.status === 'completed' || existing?.status === 'failed' ? existing.status : 'updated'
+          : event.kind === 'TurnStarted'
           ? 'running'
           : event.kind === 'TurnCompleted'
             ? readEventStatus(event) === 'failed' ? 'failed' : 'completed'
             : event.kind === 'ErrorOccurred'
               ? 'failed'
-              : existing?.status === 'running' ? 'running' : 'updated';
+              : existing?.status ?? 'updated';
+        if (existing?.latestAt === event.occurredAt && existing.status === status) continue;
         if (next === current) next = { ...current };
         next[event.threadId] = { latestAt: event.occurredAt, status };
       }
@@ -636,9 +639,14 @@ function DeviceWorkspace({
   }, [events]);
 
   useEffect(() => {
-    if (activeTurns.length === 0) return;
     setThreadActivities((current) => {
       let next = current;
+      for (const [threadId, activity] of Object.entries(current)) {
+        if (activity.status !== 'running' || activeTurns.some((turn) => turn.threadId === threadId) ||
+            activity.latestAt > (snapshot?.lastActivityAt ?? 0)) continue;
+        if (next === current) next = { ...current };
+        next[threadId] = { ...activity, status: 'updated' };
+      }
       for (const active of activeTurns) {
         const existing = next[active.threadId];
         if (existing && existing.latestAt >= active.lastActivityAt && existing.status === 'running') continue;
@@ -650,7 +658,7 @@ function DeviceWorkspace({
       }
       return next;
     });
-  }, [activeTurns]);
+  }, [activeTurns, snapshot]);
 
   useEffect(() => saveThreadActivities(device.deviceId, threadActivities), [device.deviceId, threadActivities]);
   useEffect(() => saveThreadReadReceipts(device.deviceId, readReceipts), [device.deviceId, readReceipts]);
@@ -684,8 +692,10 @@ function DeviceWorkspace({
   const selectedActiveTurn = selectedThreadId ? activeTurnByThread.get(selectedThreadId) : undefined;
   const hasActiveTurn = Boolean(selectedActiveTurn);
   const taskRunning = hasActiveTurn;
+  const observedSession = events.some((event) => event.threadId === selectedThreadId) ||
+    (snapshot?.activeThreadId === selectedThreadId && Boolean(selectedThreadId));
   const externalSession = Boolean(
-    selectedThreadId && !selectedActiveTurn && !newSession,
+    selectedThreadId && !selectedActiveTurn && !observedSession && !newSession,
   );
   const runningStartedAt = readTimestamp(selectedActiveTurn?.startedAt);
   const runningElapsedMs = taskRunning && runningStartedAt !== undefined
@@ -693,10 +703,8 @@ function DeviceWorkspace({
     : undefined;
   const conversationId = selectedThreadId;
   const conversationSnapshot = snapshotForActiveTurn(snapshot, selectedActiveTurn);
-  const displayedActivity = selectedActiveTurn?.currentActivity ??
-    (activeTurns.length === 0 ? snapshot?.currentActivity : undefined);
-  const displayedCommand = selectedActiveTurn?.runningCommand ??
-    (activeTurns.length === 0 ? snapshot?.runningCommand : undefined);
+  const displayedActivity = selectedActiveTurn?.currentActivity;
+  const displayedCommand = selectedActiveTurn?.runningCommand;
 
   useEffect(() => {
     if (!taskRunning) return;
@@ -718,7 +726,7 @@ function DeviceWorkspace({
     return threadHistory.entries.map((entry) => {
       const timing = timings.get(entry.turnId);
       return {
-        id: `history_${entry.itemId}`,
+        id: `item_${entry.turnId}_${entry.itemId}`,
         role: entry.role,
         text: entry.text,
         turnId: entry.turnId,
@@ -823,8 +831,8 @@ function DeviceWorkspace({
 
   useEffect(() => {
     if (!completedEvent || !selectedThreadId || lastRefreshedCompletion.current === completedEvent.eventId) return;
-    lastRefreshedCompletion.current = completedEvent.eventId;
     const timer = window.setTimeout(() => {
+      lastRefreshedCompletion.current = completedEvent.eventId;
       void loadThread(selectedThreadId, true);
       void refreshThreads(true);
     }, 300);
@@ -1106,8 +1114,13 @@ function DeviceWorkspace({
           </div>
           <StatusPill
             online={device.online}
-            status={interrupting ? 'Interrupting' : taskRunning ? 'Running' : 'Idle'}
-            label={taskRunning ? '任务正在运行' : externalSession ? 'Desktop 外部会话' : 'Agent 就绪'}
+            status={interrupting ? 'Interrupting' : selectedActiveTurn?.status ??
+              (selectedActivity?.status === 'failed' ? 'Failed' : 'Idle')}
+            label={interrupting ? '正在停止' : selectedActiveTurn?.status === 'WaitingApproval' ? '等待审批'
+              : selectedActiveTurn?.status === 'WaitingUserInput' ? '等待输入'
+              : taskRunning ? '任务正在运行' : externalSession ? 'Desktop 外部会话'
+              : selectedActivity?.status === 'failed' ? '任务失败'
+              : selectedActivity?.status === 'completed' ? '任务已完成' : 'Agent 就绪'}
           />
           <button
             className="stop-button"
@@ -1569,17 +1582,29 @@ function setsEqual(left: Set<string>, right: Set<string>) {
 
 function mergeChatEntries(...groups: ChatEntry[][]): ChatEntry[] {
   const merged: ChatEntry[] = [];
-  const ids = new Set<string>();
-  const content = new Set<string>();
   for (const group of groups) {
     for (const entry of group) {
-      if (ids.has(entry.id)) continue;
-      const contentKey = entry.role === 'user' || entry.role === 'assistant'
-        ? `${entry.role}\u0000${entry.text}`
-        : undefined;
-      if (contentKey && content.has(contentKey)) continue;
-      ids.add(entry.id);
-      if (contentKey) content.add(contentKey);
+      const index = merged.findIndex((candidate) => candidate.id === entry.id);
+      if (index >= 0) {
+        // History can contain a prefix from before this browser subscribed to the stream.
+        const previous = merged[index];
+        let text = entry.text;
+        if (entry.streaming && !text.startsWith(previous.text)) {
+          let overlap = Math.min(previous.text.length, text.length);
+          while (overlap > 0 && !previous.text.endsWith(text.slice(0, overlap))) overlap -= 1;
+          text = previous.text + text.slice(overlap);
+        }
+        merged[index] = { ...previous, ...entry, text };
+        continue;
+      }
+      const provisional = (value: ChatEntry) => value.id.startsWith('local_') || value.id === 'snapshot-last-message';
+      const echo = merged.findIndex((candidate) => candidate.role === entry.role && candidate.text === entry.text &&
+        (!candidate.turnId || !entry.turnId || candidate.turnId === entry.turnId) &&
+        (provisional(candidate) || provisional(entry)));
+      if (echo >= 0) {
+        if (provisional(merged[echo]) && !provisional(entry)) merged[echo] = entry;
+        continue;
+      }
       merged.push(entry);
     }
   }
@@ -1609,9 +1634,20 @@ function buildChatEntries(events: CodexEvent[], snapshot: CodexSnapshot | undefi
     const text = eventText(event.data);
     const durationMs = event.turnId ? resolveDurationMs(timings.get(event.turnId)) : undefined;
     switch (event.kind) {
+      case 'UserMessageCompleted':
+        if (text || Array.isArray(event.data.attachments)) entries.push({
+          id: event.itemId ? `item_${event.turnId}_${event.itemId}` : event.eventId,
+          role: 'user',
+          text,
+          turnId: event.turnId,
+          occurredAt: event.occurredAt,
+          attachments: Array.isArray(event.data.attachments)
+            ? event.data.attachments as CodexThreadHistoryAttachment[] : undefined,
+        });
+        break;
       case 'AgentMessageCompleted':
         if (text) entries.push({
-          id: event.eventId,
+          id: event.itemId ? `item_${event.turnId}_${event.itemId}` : event.eventId,
           role: 'assistant',
           text,
           turnId: event.turnId,
@@ -1621,7 +1657,7 @@ function buildChatEntries(events: CodexEvent[], snapshot: CodexSnapshot | undefi
         break;
       case 'AgentMessageDelta':
         if (text) entries.push({
-          id: event.eventId,
+          id: event.itemId ? `item_${event.turnId}_${event.itemId}` : event.eventId,
           role: 'assistant',
           text,
           meta: '实时回复',
@@ -1676,7 +1712,8 @@ function buildChatEntries(events: CodexEvent[], snapshot: CodexSnapshot | undefi
   if (snapshot?.lastAgentMessage && !entries.some((entry) =>
     entry.role === 'assistant' && entry.text === snapshot.lastAgentMessage,
   )) {
-    entries.push({ id: 'snapshot-last-message', role: 'assistant', text: snapshot.lastAgentMessage });
+    entries.push({ id: 'snapshot-last-message', role: 'assistant', text: snapshot.lastAgentMessage,
+      turnId: snapshot.activeTurnId });
   }
   return entries.slice(-80);
 }
@@ -1736,7 +1773,7 @@ function activeTurnsForSnapshot(snapshot?: CodexSnapshot): CodexActiveTurn[] {
   const advertised = snapshot?.activeTurns?.filter((turn) =>
     Boolean(turn.threadId && turn.turnId),
   ) ?? [];
-  if (advertised.length > 0) return advertised;
+  if (snapshot?.activeTurns !== undefined) return advertised;
   if (!snapshot?.activeThreadId || !snapshot.activeTurnId) return [];
   return [{
     threadId: snapshot.activeThreadId,
@@ -1752,6 +1789,36 @@ function activeTurnsForSnapshot(snapshot?: CodexSnapshot): CodexActiveTurn[] {
     lastAgentMessage: snapshot.lastAgentMessage,
     lastError: snapshot.lastError,
   }];
+}
+
+function reconcileActiveTurns(snapshot: CodexSnapshot | undefined, events: CodexEvent[]): CodexActiveTurn[] {
+  const turns = new Map(activeTurnsForSnapshot(snapshot).map((turn) => [turn.threadId, turn]));
+  for (const event of [...events].reverse()) {
+    if (!event.threadId || event.revision < (snapshot?.revision ?? 0)) continue;
+    const active = turns.get(event.threadId);
+    if (event.kind === 'TurnStarted' && event.turnId) {
+      if (active?.turnId === event.turnId) continue;
+      turns.set(event.threadId, {
+        threadId: event.threadId, turnId: event.turnId, status: 'Thinking',
+        startedAt: readTimestamp(event.data.startedAt) ?? event.occurredAt,
+        lastActivityAt: event.occurredAt, changedFiles: [], pendingApprovalCount: 0,
+      });
+    } else if (event.kind === 'TurnCompleted' && active?.turnId === event.turnId) {
+      turns.delete(event.threadId);
+    } else if (event.kind === 'ThreadStatusChanged') {
+      if (event.data.status === 'active' && active) {
+        const flags = Array.isArray(event.data.activeFlags) ? event.data.activeFlags : [];
+        turns.set(event.threadId, { ...active,
+          status: flags.includes('waitingOnApproval') ? 'WaitingApproval'
+            : flags.includes('waitingOnUserInput') ? 'WaitingUserInput'
+            : active.status === 'WaitingApproval' || active.status === 'WaitingUserInput' ? 'Thinking' : active.status,
+        });
+      } else if (event.data.status === 'idle' || event.data.status === 'notLoaded' || event.data.status === 'systemError') {
+        turns.delete(event.threadId);
+      }
+    }
+  }
+  return [...turns.values()];
 }
 
 function snapshotForActiveTurn(

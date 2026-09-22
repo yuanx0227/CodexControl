@@ -477,6 +477,8 @@ AgentStarted
 AgentIdle
 TurnStarted
 TurnCompleted
+ThreadStatusChanged
+UserMessageCompleted
 AgentMessageDelta
 AgentMessageCompleted
 CommandStarted
@@ -528,7 +530,11 @@ Device 分页调用 `model/list(includeHidden=false)`，只把规范化后的 `i
 
 Device 调用 `thread/list`，按 `recency_at desc` 查询 `cli`、`vscode`、`appServer`、`exec` 和 `unknown` 来源，同时调用 `project/list`。返回值规范化 `threadId/name/preview/cwd/createdAt/updatedAt/recencyAt/status/sourceKind/projectId` 与 `projectId/name/position/roots`。当前 Desktop 若返回空项目目录，PWA 只对真实工作 cwd 做兼容项目分组；自动日期会话进入“最近”。Relay 不持久化这些正文或导航字段。该请求要求 `view` 权限。
 
-`AgentMessageDelta` 的 `data.delta` 按 `itemId` 有序合并。PWA 必须立即更新当前助手消息并显示流式光标；`AgentMessageCompleted` 到达后删除对应 Delta 聚合项并采用最终 `data.text`，不得重复显示。
+`AgentMessageDelta` 的 `data.delta` 按 `threadId + turnId + itemId` 有序合并。PWA 必须立即更新当前助手消息并显示流式光标；`AgentMessageCompleted` 到达后删除对应 Delta 聚合项并采用最终 `data.text`，不得重复显示。历史与实时正文使用相同 Item 身份；不同 Turn 的相同文本必须保留。
+
+`ThreadStatusChanged.data` 包含规范化 `status`（`active/idle/notLoaded/systemError`）和 `activeFlags`（`waitingOnApproval/waitingOnUserInput`）。Agent 用它修正已知活动 Turn 的等待状态和清理过期活动记录；没有真实 Turn ID 时不得凭空创建可控制的 Turn。PWA 将不早于当前 Snapshot revision 的生命周期事件合并进运行状态；显式空 `activeTurns` 是权威空集合，不能回退旧的顶层活动字段。
+
+`UserMessageCompleted.data` 包含受限 `text` 和可选 `attachments`，复用历史读取的附件边界。`item/started` 和 `item/completed` 的 `userMessage` 都映射到此事件，PWA 按同一 Item 身份替换，另一控制端的输入无需重进会话即可显示。Relay 继续按 `codex.event` 扇出规范化数据，不解析或保存原始 app-server 消息。
 
 读取指定历史会话：
 

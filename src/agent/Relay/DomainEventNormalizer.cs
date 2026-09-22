@@ -18,12 +18,14 @@ internal static class DomainEventNormalizer
         var kind = method switch
         {
             "thread/started" => "AgentStarted",
+            "thread/status/changed" => "ThreadStatusChanged",
             "turn/started" => "TurnStarted",
             "turn/completed" => "TurnCompleted",
             "item/agentMessage/delta" => "AgentMessageDelta",
             "item/started" when ItemType(message) == "commandExecution" => "CommandStarted",
             "item/completed" when ItemType(message) == "commandExecution" => "CommandCompleted",
             "item/completed" when ItemType(message) == "agentMessage" => "AgentMessageCompleted",
+            "item/started" or "item/completed" when ItemType(message) == "userMessage" => "UserMessageCompleted",
             "item/completed" when ItemType(message) == "fileChange" => "FileChanged",
             "error" => "ErrorOccurred",
             _ => null,
@@ -35,6 +37,16 @@ internal static class DomainEventNormalizer
 
         var data = kind switch
         {
+            "ThreadStatusChanged" => JsonSerializer.SerializeToElement(new
+            {
+                status = FindString(message, "params", "status", "type"),
+                activeFlags = TryFind(message, out var flags, "params", "status", "activeFlags") &&
+                              flags.ValueKind == JsonValueKind.Array
+                    ? flags.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String)
+                        .Select(value => value.GetString()).Where(value => value is "waitingOnApproval" or "waitingOnUserInput").ToArray()
+                    : [],
+            }, RelayJson.Options),
+            "UserMessageCompleted" => MapUserMessageData(message),
             "TurnStarted" => JsonSerializer.SerializeToElement(new
             {
                 startedAt = FindInt64(message, "params", "turn", "startedAt"),
@@ -85,6 +97,17 @@ internal static class DomainEventNormalizer
     }
 
     private static string? ItemType(JsonElement message) => FindString(message, "params", "item", "type");
+
+    private static JsonElement MapUserMessageData(JsonElement message)
+    {
+        var content = TryFind(message, out var item, "params", "item")
+            ? CodexThreadHistoryMapper.MapUserContent(item) : null;
+        return JsonSerializer.SerializeToElement(new
+        {
+            text = Truncate(content?.Text, 20_000),
+            attachments = content?.Attachments,
+        }, RelayJson.Options);
+    }
 
     private static string? FindString(JsonElement root, params string[] path)
     {

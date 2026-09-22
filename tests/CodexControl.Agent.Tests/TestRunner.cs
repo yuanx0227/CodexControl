@@ -37,6 +37,7 @@ internal static class TestRunner
             ("AgentSettings_AtomicRecovery", TestAgentSettingsAsync),
             ("ThreadHistory_Markdown_Image_Timing_Summary", TestRichThreadHistoryAsync),
             ("CodexStateManager", TestCodexStateManagerAsync),
+            ("SessionSync_Status_UserMessage", TestSessionSyncAsync),
             ("CodexDesktopRuntimeResolver", TestCodexDesktopRuntimeResolverAsync),
             ("CodexExecutableProbe", TestCodexExecutableProbeAsync),
             ("AppServerBridge_LocalWsProxy", TestBridgeAndProxyAsync),
@@ -434,6 +435,49 @@ internal static class TestRunner
             {"method":"turn/completed","params":{"threadId":"thr-b","turn":{"id":"turn-b","status":"completed"}}}
             """);
         Assert(state.Snapshot.ActiveTurns.Count == 0, "all active turns should clear independently");
+        return Task.CompletedTask;
+    }
+
+    private static Task TestSessionSyncAsync()
+    {
+        var state = new CodexStateManager();
+        state.MarkIdle();
+        Apply(state, """
+            {"method":"turn/started","params":{"threadId":"thr-sync","turn":{"id":"turn-current"}}}
+            """);
+        using var waiting = JsonDocument.Parse("""
+            {"method":"thread/status/changed","params":{"threadId":"thr-sync","status":{"type":"active","activeFlags":["waitingOnUserInput"]}}}
+            """);
+        state.ApplyServerMessage(waiting.RootElement);
+        Assert(state.Snapshot.Status == CodexActivityStatus.WaitingUserInput, "public thread flags must update activity");
+        var normalized = DomainEventNormalizer.Normalize(waiting.RootElement, state.Snapshot)!;
+        Assert(normalized.Kind == "ThreadStatusChanged" && normalized.ThreadId == "thr-sync" &&
+               normalized.Data.GetProperty("status").GetString() == "active", "Relay must receive normalized thread status");
+        Apply(state, """
+            {"method":"turn/completed","params":{"threadId":"thr-sync","turn":{"id":"turn-old","status":"completed"}}}
+            """);
+        Assert(state.Snapshot.ActiveTurnId == "turn-current", "late completion cannot finish a newer turn");
+        Apply(state, """
+            {"method":"thread/status/changed","params":{"threadId":"thr-sync","status":{"type":"active","activeFlags":[]}}}
+            """);
+        Assert(state.Snapshot.Status == CodexActivityStatus.Thinking, "cleared flags must release waiting status");
+        Apply(state, """
+            {"method":"thread/status/changed","params":{"threadId":"thr-sync","status":{"type":"idle"}}}
+            """);
+        Assert(state.Snapshot.ActiveTurns.Count == 0 && state.Snapshot.ActiveTurnId is null,
+            "idle status must clear stale active turns without inventing a completed result");
+        foreach (var method in new[] { "item/started", "item/completed" })
+        {
+            using var message = JsonDocument.Parse(JsonSerializer.Serialize(new
+            {
+                method,
+                @params = new { threadId = "thr-sync", turnId = "turn-current",
+                    item = new { id = "user-1", type = "userMessage", content = new[] { new { type = "text", text = "另一端输入" } } } },
+            }));
+            var user = DomainEventNormalizer.Normalize(message.RootElement, state.Snapshot)!;
+            Assert(user.Kind == "UserMessageCompleted" && user.ItemId == "user-1" &&
+                   user.Data.GetProperty("text").GetString() == "另一端输入", "both user item notifications must reach the live message stream");
+        }
         return Task.CompletedTask;
     }
 

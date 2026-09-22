@@ -95,6 +95,9 @@ public sealed class CodexStateManager
             case "turn/started":
                 ApplyTurnStarted(message);
                 break;
+            case "thread/status/changed":
+                ApplyThreadStatusChanged(message);
+                break;
             case "item/started":
                 ApplyItemStarted(message);
                 break;
@@ -188,6 +191,59 @@ public sealed class CodexStateManager
                 null);
             _activeTurns = _activeTurns.SetItem(threadId, active);
             Publish(Focus(_snapshot, active));
+        }
+    }
+
+    private void ApplyThreadStatusChanged(JsonElement message)
+    {
+        var threadId = FindThreadId(message);
+        var type = FindString(message, "params", "status", "type");
+        if (string.IsNullOrWhiteSpace(threadId)) return;
+
+        lock (_gate)
+        {
+            if (!_activeTurns.TryGetValue(threadId, out var active)) return;
+            if (type == "active")
+            {
+                var flags = TryFindElement(message, out var values, "params", "status", "activeFlags") &&
+                            values.ValueKind == JsonValueKind.Array
+                    ? values.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String)
+                        .Select(value => value.GetString()).ToArray()
+                    : [];
+                var status = flags.Contains("waitingOnApproval")
+                    ? CodexActivityStatus.WaitingApproval
+                    : flags.Contains("waitingOnUserInput")
+                        ? CodexActivityStatus.WaitingUserInput
+                        : active.Status is CodexActivityStatus.WaitingApproval or CodexActivityStatus.WaitingUserInput
+                            ? CodexActivityStatus.Thinking
+                            : active.Status;
+                var updated = active with
+                {
+                    Status = status,
+                    LastActivityAt = DateTimeOffset.UtcNow,
+                    CurrentActivity = status == CodexActivityStatus.WaitingApproval ? "Waiting for approval"
+                        : status == CodexActivityStatus.WaitingUserInput ? "Waiting for user input"
+                        : status == CodexActivityStatus.Thinking ? "Codex is thinking" : active.CurrentActivity,
+                };
+                _activeTurns = _activeTurns.SetItem(threadId, updated);
+                Publish(Focus(_snapshot, updated));
+            }
+            else if (type is "idle" or "notLoaded" or "systemError")
+            {
+                _activeTurns = _activeTurns.Remove(threadId);
+                _pendingApprovals = _pendingApprovals.RemoveRange(_pendingApprovals
+                    .Where(entry => entry.Value.ThreadId == threadId).Select(entry => entry.Key));
+                var next = _activeTurns.Values.OrderByDescending(value => value.LastActivityAt).FirstOrDefault();
+                Publish(next is not null ? Focus(_snapshot, next) : _snapshot with
+                {
+                    Status = type == "systemError" ? CodexActivityStatus.Failed : CodexActivityStatus.Idle,
+                    ActiveThreadId = threadId,
+                    ActiveTurnId = null,
+                    CurrentActivity = null,
+                    RunningCommand = null,
+                    LastError = type == "systemError" ? "Thread system error" : null,
+                });
+            }
         }
     }
 
@@ -295,6 +351,8 @@ public sealed class CodexStateManager
         lock (_gate)
         {
             var found = TryResolveActiveTurn(message, out var threadId, out var completed);
+            // A delayed completion from an earlier turn must not clear the current turn or its approvals.
+            if (!found && _activeTurns.ContainsKey(threadId)) return;
             var turnId = FindTurnId(message) ?? (found ? completed.TurnId : null);
             if (found)
             {

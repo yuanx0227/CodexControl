@@ -256,6 +256,25 @@ internal static class RelayTestRunner
             .ConfigureAwait(false)).ReadPayload<CodexSnapshotPayload>();
         Assert(secondTabSnapshot.Revision == 1, "snapshot should reach every tab for the controller identity");
 
+        foreach (var kind in new[] { "ThreadStatusChanged", "UserMessageCompleted" })
+        {
+            var data = kind == "ThreadStatusChanged"
+                ? JsonSerializer.SerializeToElement(new { status = "active", activeFlags = new[] { "waitingOnUserInput" } })
+                : JsonSerializer.SerializeToElement(new { text = "message from another client", attachments = Array.Empty<object>() });
+            var domainEvent = new CodexEventPayload(Guid.NewGuid().ToString("N"), 1, kind,
+                "thr-1", "turn-1", "item-sync", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), data);
+            await device.SendAsync(RelayEnvelope.Create(RelayMessageTypes.CodexEvent, domainEvent,
+                deviceId: device.PrincipalId)).ConfigureAwait(false);
+            foreach (var tab in new[] { controller, secondControllerTab })
+            {
+                var forwarded = (await tab.ReceiveAsync(RelayMessageTypes.CodexEvent).ConfigureAwait(false))
+                    .ReadPayload<CodexEventPayload>();
+                Assert(forwarded.Kind == kind && forwarded.EventId == domainEvent.EventId &&
+                       forwarded.Data.GetRawText() == data.GetRawText(),
+                    "normalized status and user messages must reach every controller tab unchanged");
+            }
+        }
+
         var controlRequestId = RelayTestClient.NewRequestId();
         await controller.SendAsync(RelayEnvelope.Create(
             RelayMessageTypes.ControlSteer,

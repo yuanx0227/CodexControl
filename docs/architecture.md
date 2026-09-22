@@ -270,6 +270,8 @@ Relay 不持久化完整事件流，只保存最新 Snapshot 和必要审计元�
 
 独立 Agent 无法订阅另一个 Codex Desktop app-server 进程内部的事件。此类 Thread 显示为“Desktop 外部会话（状态不可订阅）”，只在用户明确打开或手动刷新时读取历史；用户从 PWA 恢复后，它才成为 Agent 托管会话并进入事件驱动链路。PWA 按 Thread 保存无正文的活动时间/状态和已读时间，派生运行、未读、完成未读与失败未读标志。
 
+会话同步修复补齐 `thread/status/changed` 和用户消息 Item 的 Domain Events。网页根据 Snapshot 与后续生命周期事件同步运行、等待审批和等待输入状态；历史正文与流式消息按 Thread/Turn/Item 身份合并，同文的不同轮次不会被去重。这些修复适用于 Agent 所连接的 app-server；它们不提供官方 Desktop 与独立 Agent 对同一会话的共享连接，也不解决两进程间的会话占用。官方 Desktop 的同会话实时双端交互仍需可用的公开共享 app-server 通道，不能由历史读取或私有连接替代。
+
 消息流首次打开时定位到底部；后续事件仅在用户原本位于底部时自动跟随。用户向上阅读时保存滚动锚点，显示“新消息”按钮，不再因历史对象替换而重置位置。
 
 同一浏览器身份可以同时打开多个标签页。Relay 为 Device 保留单连接替换语义，但按 `controllerId + connectionId` 保存全部 Controller 页面；Presence、Snapshot、Event 和 Control Result 会发送给该 Controller 身份的所有活动页面，未发起请求的页面会忽略不匹配的 `requestId`。

@@ -263,7 +263,7 @@ internal static class CodexThreadHistoryMapper
         return true;
     }
 
-    private static MappedUserContent? MapUserContent(JsonElement item)
+    internal static MappedUserContent? MapUserContent(JsonElement item)
     {
         if (!item.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
         {

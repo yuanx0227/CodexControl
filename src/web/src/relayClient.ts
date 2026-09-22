@@ -594,11 +594,15 @@ export class RelayClient {
   private applyEvent(deviceId: string | undefined, event: CodexEvent): void {
     if (!deviceId) return;
     const currentEvents = this.state.events[deviceId] ?? [];
+    if (currentEvents.some((candidate) => candidate.eventId === event.eventId)) return;
+    const sameItem = (candidate: CodexEvent) => candidate.itemId === event.itemId &&
+      candidate.threadId === event.threadId && candidate.turnId === event.turnId;
     let events: CodexEvent[];
     if (event.kind === 'AgentMessageDelta' && event.itemId) {
+      if (currentEvents.some((candidate) => candidate.kind === 'AgentMessageCompleted' && sameItem(candidate))) return;
       const delta = typeof event.data.delta === 'string' ? event.data.delta : '';
       const existing = currentEvents.find((candidate) =>
-        candidate.kind === 'AgentMessageDelta' && candidate.itemId === event.itemId,
+        candidate.kind === 'AgentMessageDelta' && sameItem(candidate),
       );
       const previousText = existing && typeof existing.data.text === 'string' ? existing.data.text : '';
       const streamingEvent: CodexEvent = {
@@ -611,11 +615,12 @@ export class RelayClient {
         streamingEvent,
         ...currentEvents.filter((candidate) => candidate !== existing),
       ].slice(0, 100);
-    } else if (event.kind === 'AgentMessageCompleted' && event.itemId) {
+    } else if ((event.kind === 'AgentMessageCompleted' || event.kind === 'UserMessageCompleted') && event.itemId) {
       events = [
         event,
         ...currentEvents.filter((candidate) =>
-          !(candidate.kind === 'AgentMessageDelta' && candidate.itemId === event.itemId),
+          !(sameItem(candidate) && (candidate.kind === event.kind ||
+            (event.kind === 'AgentMessageCompleted' && candidate.kind === 'AgentMessageDelta'))),
         ),
       ].slice(0, 100);
     } else {

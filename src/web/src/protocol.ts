@@ -180,6 +180,7 @@ export interface CodexSessionOptions {
 export interface CodexEvent {
   eventId: string;
   revision: number;
+  // Includes ThreadStatusChanged (status, activeFlags) and UserMessageCompleted (text, attachments).
   kind: string;
   threadId?: string;
   turnId?: string;

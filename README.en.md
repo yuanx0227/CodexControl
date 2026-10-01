@@ -10,6 +10,10 @@ View, create, and control Codex sessions on Windows from your phone or browser. 
 
 ## Screenshots
 
+**Windows desktop Agent**
+
+![Windows desktop Agent](docs/images/agent-desktop.png)
+
 <table>
   <tr><th>Desktop browser</th><th>Mobile browser</th></tr>
   <tr>
@@ -18,7 +22,7 @@ View, create, and control Codex sessions on Windows from your phone or browser. 
   </tr>
 </table>
 
-Actual web app, shown with sample session data.
+The desktop screenshot shows the running Agent with its server address hidden. Web screenshots use sample session data.
 
 ## Build the Windows Agent
 

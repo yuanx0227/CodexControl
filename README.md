@@ -10,6 +10,10 @@
 
 ## 界面
 
+**Windows 桌面 Agent**
+
+![Windows 桌面 Agent](docs/images/agent-desktop.png)
+
 <table>
   <tr><th>桌面浏览器</th><th>手机浏览器</th></tr>
   <tr>
@@ -18,7 +22,7 @@
   </tr>
 </table>
 
-实际网页界面，截图使用示例会话数据。
+桌面截图来自实际运行的 Agent，服务器地址已隐藏；网页截图使用示例会话数据。
 
 ## 构建 Windows Agent
 

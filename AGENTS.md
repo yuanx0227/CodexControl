@@ -18,6 +18,7 @@
 - Publish and push this project only to `https://github.com/yuanx0227/CodexControl.git` on GitHub.com.
 - Keep `origin` pointed at that GitHub.com repository. Do not push to the former private Git service or restore it as a remote unless the user explicitly changes this instruction.
 - Never commit credentials, runtime identity/data, local browser automation output, or build artifacts.
+- Reuse the GitHub authorization saved by Git Credential Manager in Windows Credential Manager for Git and API access. Do not repeat browser, password, or device login while the saved authorization works; never put credentials in files, documentation, or memory.
 
 ## Project map
 

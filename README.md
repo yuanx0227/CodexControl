@@ -1,5 +1,7 @@
 # Codex Control
 
+[简体中文](README.md) | [English](README.en.md)
+
 Codex Control 是一套自托管的 Codex Control Plane，用于从手机或另一台电脑观察并干预 Windows 上的 Managed Codex。
 
 系统由三部分组成：
@@ -10,9 +12,44 @@ Codex Control 是一套自托管的 Codex Control Plane，用于从手机或另�
 
 项目不抓取 Codex UI、不模拟鼠标键盘、不托管 OpenAI API Key，也不修改用户现有 Model Provider 或 Endpoint。
 
+本项目的发布和默认推送地址为 **GitHub.com** 上的 [yuanx0227/CodexControl](https://github.com/yuanx0227/CodexControl)。
+
+## 环境要求
+
+| 用途 | 要求 |
+| --- | --- |
+| Windows Agent | Windows 10/11 x64，.NET 8 Desktop Runtime 和 ASP.NET Core Runtime |
+| Codex 运行时 | 已配置可用的 Codex CLI 或 Codex Desktop；运行时需支持 `app-server --listen stdio://` 和 `--remote` |
+| 源码构建 | .NET 8 SDK 或可编译 .NET 8 的较新 SDK、Node.js 24、PowerShell 7 |
+| 安装包生成 | Inno Setup 6 |
+| Relay / PWA 部署 | Docker 和 Docker Compose；生产域名及可信 TLS 证书 |
+
+Agent 发布为非自包含程序。源码开发所用的 .NET SDK 提供相应运行时；安装版也需要上述 .NET 8 运行时。
+
+## 获取源码
+
+```powershell
+git clone https://github.com/yuanx0227/CodexControl.git
+Set-Location '.\CodexControl'
+```
+
+## 架构与会话边界
+
+```mermaid
+flowchart LR
+    Browser[手机 / 电脑 PWA] <-->|HTTPS / WSS| Relay[Relay + SQLite]
+    Relay <-->|WSS| Agent[Windows Agent]
+    Agent <-->|stdio JSON-RPC| Codex[codex app-server]
+    TUI[本地 Codex TUI] <-->|127.0.0.1 WebSocket| Agent
+```
+
+Agent 运行独立的 `codex app-server`。由 Agent 创建或恢复的会话具有实时事件和远程控制能力。同一会话同时只允许一个活动 Turn，不同会话可以并行。
+
+Codex Desktop 原生会话可以按需读取历史，但独立 Agent 无法订阅另一个 Desktop 进程的实时事件。网页会显示外部会话边界；本项目不提供 Desktop 当前会话的实时双端共享连接。
+
 ## MVP 状态
 
-MVP 代码与自动化闭环已经实现：
+当前实现与历史自动化验证范围：
 
 - `.NET 8` 独立 Windows Agent；
 - 自动发现 Codex Desktop 内置运行时并按 Desktop 版本原子暂存、复用；
@@ -63,8 +100,8 @@ tools/                      握手探针与 Release 脚本
 
 ```powershell
 $env:ASPNETCORE_ENVIRONMENT = 'Development'
-$env:CODEX_CONTROL_DB = 'D:\Data\CodexControl\relay.db'
-$env:CODEX_CONTROL_PAIRING_SECRET = '<至少32位随机字符串>'
+$env:CODEX_CONTROL_DB = Join-Path $env:LOCALAPPDATA 'CodexControl\dev-relay.db'
+$env:CODEX_CONTROL_PAIRING_SECRET = [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 $env:CODEX_CONTROL_ALLOWED_ORIGINS = 'http://127.0.0.1:5173'
 dotnet run --project '.\src\relay\CodexControl.Relay.csproj' -- --urls http://127.0.0.1:5080
 ```
@@ -78,9 +115,15 @@ npm run dev
 ```
 
 二维码会带入 Relay 根地址；手工开发连接使用 `ws://127.0.0.1:5080/ws/controller`。
-非本机环境必须使用 `wss://`。
+打开 `http://127.0.0.1:5173`。此模式适用于同一台电脑的开发；手机和其他电脑请使用下面的 HTTPS/WSS 部署方式。
 
 ### 3. Agent、设置与配对
+
+```powershell
+dotnet run --project '.\src\agent\CodexControl.Agent.csproj'
+```
+
+也可启动已生成的发布版本：
 
 ```powershell
 & '.\out\release\agent-win-x64\CodexControlAgent.exe'
@@ -123,7 +166,7 @@ deploy/certs/privkey.pem
 本地自签名证书：
 
 ```powershell
-& "C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -File '.\generate-dev-cert.ps1'
+& '.\generate-dev-cert.ps1'
 ```
 
 ## 构建、测试与发布
@@ -139,7 +182,7 @@ npm run build
 npm test
 
 Set-Location '..\..'
-& "C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -File '.\tools\Build-Release.ps1'
+& '.\tools\Build-Release.ps1'
 ```
 
 真实 Codex Turn/Approval 测试需要显式提供完整 Codex 运行时并设置：
@@ -148,6 +191,8 @@ Set-Location '..\..'
 CODEX_CONTROL_REAL_CODEX_PATH
 CODEX_CONTROL_RUN_REAL_TURNS=1
 ```
+
+本文命令在 PowerShell 7 中执行。历史构建、模拟、浏览器和验收记录不替代当前 Codex 版本、真实手机、多电脑及生产网络的验收。
 
 ## 关键安全规则
 

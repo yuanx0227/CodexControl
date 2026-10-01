@@ -13,6 +13,12 @@
 - Web UI and WebSocket UI tests use Playwright.
 - PowerShell commands/scripts must use PowerShell 7, never Windows PowerShell 5.1.
 
+## Git publishing
+
+- Publish and push this project only to `https://github.com/yuanx0227/CodexControl.git` on GitHub.com.
+- Keep `origin` pointed at that GitHub.com repository. Do not push to the former private Git service or restore it as a remote unless the user explicitly changes this instruction.
+- Never commit credentials, runtime identity/data, local browser automation output, or build artifacts.
+
 ## Project map
 
 ```text

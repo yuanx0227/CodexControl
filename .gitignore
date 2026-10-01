@@ -2,6 +2,7 @@
 .codegraph/
 .vs/
 .vscode/
+.playwright-mcp/
 *.suo
 *.user
 
@@ -22,6 +23,7 @@ test-results/
 playwright-report/
 
 # Runtime-only state
+/data/
 logs/
 *.log
 *.db

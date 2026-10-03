@@ -1,4 +1,7 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using CodexControl.Protocol;
 
 namespace CodexControl.Relay.Routing;
@@ -23,12 +26,14 @@ public sealed class ControlRequestTracker
         string requestId,
         string deviceId,
         string controllerId,
-        string messageType)
+        string messageType,
+        JsonElement? payload = null)
     {
         Cleanup();
-        var created = new Entry(deviceId, controllerId, messageType, DateTimeOffset.UtcNow);
+        var payloadKey = payload is null ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload.Value.GetRawText())));
+        var created = new Entry(deviceId, controllerId, messageType, payloadKey, DateTimeOffset.UtcNow);
         var entry = _entries.GetOrAdd(requestId, created);
-        if (entry.DeviceId != deviceId || entry.ControllerId != controllerId || entry.MessageType != messageType)
+        if (entry.DeviceId != deviceId || entry.ControllerId != controllerId || entry.MessageType != messageType || entry.PayloadKey != payloadKey)
         {
             return new(ControlBeginStatus.Conflict, null);
         }
@@ -93,12 +98,14 @@ public sealed class ControlRequestTracker
         string deviceId,
         string controllerId,
         string messageType,
+        string? payloadKey,
         DateTimeOffset createdAt)
     {
         public object Gate { get; } = new();
         public string DeviceId { get; } = deviceId;
         public string ControllerId { get; } = controllerId;
         public string MessageType { get; } = messageType;
+        public string? PayloadKey { get; } = payloadKey;
         public DateTimeOffset CreatedAt { get; } = createdAt;
         public DateTimeOffset? CompletedAt { get; set; }
         public RelayEnvelope? Result { get; set; }

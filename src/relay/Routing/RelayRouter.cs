@@ -252,6 +252,9 @@ public sealed class RelayRouter
             case RelayMessageTypes.ControlThreadRead:
             case RelayMessageTypes.ControlThreadStart:
             case RelayMessageTypes.ControlThreadResume:
+            case RelayMessageTypes.ControlThreadWatch:
+            case RelayMessageTypes.ControlThreadUnwatch:
+            case RelayMessageTypes.ControlThreadSend:
                 await RouteControlAsync(peer, envelope, cancellationToken).ConfigureAwait(false);
                 break;
             case RelayMessageTypes.PairingRevoke:
@@ -298,6 +301,9 @@ public sealed class RelayRouter
             RelayMessageTypes.ControlThreadRead => pairing.ViewPermission,
             RelayMessageTypes.ControlThreadStart => pairing.SteerPermission,
             RelayMessageTypes.ControlThreadResume => pairing.SteerPermission,
+            RelayMessageTypes.ControlThreadWatch => pairing.ViewPermission,
+            RelayMessageTypes.ControlThreadUnwatch => pairing.ViewPermission,
+            RelayMessageTypes.ControlThreadSend => pairing.SteerPermission,
             _ => false,
         };
         if (!permitted)
@@ -306,6 +312,11 @@ public sealed class RelayRouter
                 .ConfigureAwait(false);
             return;
         }
+
+        // Never trust a Controller's claim that it can activate an upstream subscription.
+        if (envelope.Type == RelayMessageTypes.ControlThreadWatch)
+            envelope = envelope with { Payload = JsonSerializer.SerializeToElement(
+                envelope.ReadPayload<ThreadWatchControlPayload>() with { AllowJoin = pairing!.SteerPermission }, RelayJson.Options) };
 
         var device = _connections.GetDevice(envelope.DeviceId);
         if (device is null)
@@ -319,7 +330,8 @@ public sealed class RelayRouter
             envelope.RequestId,
             envelope.DeviceId,
             controller.PrincipalId!,
-            envelope.Type);
+            envelope.Type,
+            envelope.Payload);
         if (begin.Status == ControlBeginStatus.Conflict)
         {
             await SendControlFailureAsync(
@@ -515,13 +527,20 @@ public sealed class RelayRouter
         var snapshot = envelope.ReadPayload<CodexSnapshotPayload>();
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var device = await db.Devices.FindAsync([deviceId], cancellationToken).ConfigureAwait(false);
-        if (device is null || snapshot.Revision < device.LatestSnapshotRevision)
+        if (device is null || (DeserializeSnapshot(device.LatestSnapshotJson)?.StreamEpoch == snapshot.StreamEpoch &&
+                              snapshot.Revision < device.LatestSnapshotRevision))
         {
             return;
         }
 
         device.LatestSnapshotRevision = snapshot.Revision;
-        device.LatestSnapshotJson = JsonSerializer.Serialize(snapshot, RelayJson.Options);
+        // Database retains operational metadata, never response text, commands, or diffs.
+        device.LatestSnapshotJson = JsonSerializer.Serialize(snapshot with
+        {
+            LastAgentMessage = null, RunningCommand = null, CurrentActivity = null, ChangedFiles = [], LastError = null,
+            ActiveTurns = snapshot.ActiveTurns?.Select(active => active with
+            { LastAgentMessage = null, RunningCommand = null, CurrentActivity = null, ChangedFiles = [], LastError = null }).ToArray(),
+        }, RelayJson.Options);
         device.LastSeenAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }

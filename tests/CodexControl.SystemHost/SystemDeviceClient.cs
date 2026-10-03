@@ -169,6 +169,16 @@ internal sealed class SystemDeviceClient : IAsyncDisposable
                         "D:\\Projects\\SystemTest",
                         "任务已停止",
                         cancellationToken).ConfigureAwait(false);
+                    var interrupted = envelope.ReadPayload<InterruptControlPayload>();
+                    await SendAsync(RelayEnvelope.Create(
+                        RelayMessageTypes.CodexEvent,
+                        new CodexEventPayload(
+                            string.Concat("evt_", Guid.NewGuid().ToString("N")),
+                            Interlocked.Read(ref _revision),
+                            "TurnCompleted", interrupted.ThreadId, interrupted.TurnId, null,
+                            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            JsonSerializer.SerializeToElement(new { status = "interrupted" }, RelayJson.Options)),
+                        deviceId: DeviceId), cancellationToken).ConfigureAwait(false);
                     await SendEventAsync(
                         "ApprovalResolved",
                         new ApprovalResolvedPayload(

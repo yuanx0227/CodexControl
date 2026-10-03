@@ -37,6 +37,8 @@ public sealed record AgentRuntimeSnapshot(
     CodexStateSnapshot Codex,
     string? LastError)
 {
+    public bool IsSharedSession { get; init; }
+    public string? ServiceInstanceId { get; init; }
     public static AgentRuntimeSnapshot Initial { get; } = new(
         Revision: 0,
         RuntimeCoreStatus.Stopped,

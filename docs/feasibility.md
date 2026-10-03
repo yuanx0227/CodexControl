@@ -2,6 +2,8 @@
 
 日期：2026-08-22（Asia/Shanghai）；最新复核：2026-08-24
 
+2026-10-03 共享会话增量实现与验证见 [实施记录](shared-session-implementation.md)。本文保留原独立模式的历史验收，不将其当作官方 Desktop/网页共享接入证明。
+
 ## 1. 结论
 
 Codex Control 的 MVP 代码、自动化协议闭环、真实 Codex 控制闭环和容器部署链已经实现。

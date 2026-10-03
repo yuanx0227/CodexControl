@@ -15,6 +15,7 @@ public enum CodexActivityStatus
     Completed,
     Interrupted,
     Failed,
+    Unknown,
 }
 
 public sealed record CodexActiveTurnSnapshot(
@@ -30,6 +31,19 @@ public sealed record CodexActiveTurnSnapshot(
     int PendingApprovalCount,
     string? LastAgentMessage,
     string? LastError);
+
+public sealed record CodexThreadStateSnapshot(
+    string ThreadId,
+    string ThreadState,
+    string? ActiveTurnId,
+    string? LastTurnId,
+    string? LastTurnStatus,
+    CodexActivityStatus Activity,
+    bool WaitingOnApproval,
+    bool WaitingOnUserInput,
+    bool RequiresRefresh,
+    DateTimeOffset LastActivityAt,
+    string? CurrentProject);
 
 public sealed record CodexStateSnapshot(
     long Revision,
@@ -49,6 +63,8 @@ public sealed record CodexStateSnapshot(
     int PairedControllerCount,
     string? LastError)
 {
+    public string ConnectionState { get; init; } = "offline";
+    public IReadOnlyList<CodexThreadStateSnapshot> Threads { get; init; } = [];
     public static CodexStateSnapshot Initial { get; } = new(
         Revision: 0,
         Status: CodexActivityStatus.Offline,

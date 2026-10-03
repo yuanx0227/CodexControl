@@ -25,7 +25,7 @@ internal static class CodexThreadHistoryMapper
 {
     public const int EntryLimit = 200;
 
-    private const int MaxEntryTextLength = 20_000;
+    private const int MaxEntryTextLength = 128_000;
     private const int MaxTotalTextLength = 200_000;
     private const int MaxThreadIdLength = 256;
     private const int MaxNameLength = 256;
@@ -252,14 +252,19 @@ internal static class CodexThreadHistoryMapper
             return false;
         }
 
-        text = text?.Trim() ?? string.Empty;
+        // Preserve the same text as the live stream; trimming would change item contents on resync.
+        text ??= string.Empty;
+        var originalLength = text.Length;
         if (text.Length > MaxEntryTextLength)
         {
-            text = string.Concat(text.AsSpan(0, MaxEntryTextLength - 1), "…");
+            var length = MaxEntryTextLength;
+            if (char.IsHighSurrogate(text[length - 1])) length--;
+            text = text[..length];
             textWasTruncated = true;
         }
 
-        entry = new CodexThreadHistoryEntryPayload(itemId, turnId, role, text, phase, attachments, changes);
+        entry = new CodexThreadHistoryEntryPayload(itemId, turnId, role, text, phase, attachments, changes,
+            textWasTruncated, textWasTruncated ? originalLength : null);
         return true;
     }
 

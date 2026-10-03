@@ -39,6 +39,13 @@ export interface PairingPermissions {
 }
 
 export interface CodexSnapshot {
+  serviceInstanceId?: string;
+  streamEpoch?: string;
+  lastSequence?: number;
+  sharedSession?: boolean;
+  connectionState?: 'connecting' | 'online' | 'reconnecting' | 'offline';
+  capabilities?: string[];
+  threads?: CodexThreadState[];
   revision: number;
   status: string;
   activeThreadId?: string;
@@ -54,6 +61,18 @@ export interface CodexSnapshot {
   lastError?: string;
   agentVersion?: string;
   activeTurns?: CodexActiveTurn[];
+}
+
+export interface CodexThreadState {
+  threadId: string;
+  threadState: string;
+  activeTurnId?: string;
+  lastTurnId?: string;
+  lastTurnStatus?: string;
+  activity?: string;
+  waitingOnApproval: boolean;
+  waitingOnUserInput: boolean;
+  freshness?: string;
 }
 
 export interface CodexActiveTurn {
@@ -117,6 +136,8 @@ export interface CodexThreadHistoryEntry {
   phase?: string;
   attachments: CodexThreadHistoryAttachment[];
   changes?: CodexThreadHistoryFileChange[];
+  truncated?: boolean;
+  originalLength?: number;
 }
 
 export interface CodexThreadHistoryAttachment {
@@ -155,6 +176,20 @@ export interface CodexThreadActionResult {
   turnId: string;
 }
 
+export interface CodexThreadWatchResult {
+  threadId: string;
+  serviceInstanceId: string;
+  streamEpoch: string;
+  sequence: number;
+  history: CodexThreadReadResult;
+  snapshot: CodexSnapshot;
+  approvals: ApprovalRequested[];
+  events: CodexEvent[];
+  resyncRequired: boolean;
+  controlAllowed: boolean;
+  policyReason?: string;
+}
+
 export type CodexApprovalPolicy = 'untrusted' | 'on-request' | 'never';
 
 export interface CodexModelOption {
@@ -178,6 +213,9 @@ export interface CodexSessionOptions {
 }
 
 export interface CodexEvent {
+  serviceInstanceId?: string;
+  streamEpoch?: string;
+  sequence?: number;
   eventId: string;
   revision: number;
   // Includes ThreadStatusChanged (status, activeFlags) and UserMessageCompleted (text, attachments).
@@ -190,6 +228,7 @@ export interface CodexEvent {
 }
 
 export interface ApprovalRequested {
+  isResolving?: boolean;
   approvalId: string;
   requestMethod: string;
   threadId?: string;

@@ -18,6 +18,7 @@ import type {
 } from './protocol';
 import { RelayClient, type RelayClientState } from './relayClient';
 import { loadRelayUrl, saveRelayUrl } from './storage';
+import type { ThreadView } from './threadStore';
 
 const initialState: RelayClientState = {
   connection: 'offline',
@@ -25,6 +26,7 @@ const initialState: RelayClientState = {
   devices: [],
   events: {},
   approvals: {},
+  threads: {},
 };
 
 export function App() {
@@ -73,6 +75,7 @@ export function App() {
         device={selected}
         events={state.events[selected.deviceId] ?? []}
         approvals={state.approvals[selected.deviceId] ?? []}
+        threadViews={state.threads[selected.deviceId] ?? {}}
         connection={state.connection}
         authenticated={state.authenticated}
         relayVersion={state.relayVersion}
@@ -389,11 +392,19 @@ interface ThreadActivityState {
   status: ThreadActivityStatus;
 }
 
+function sharedThreadActivity(view?: ThreadView): ThreadActivityState | undefined {
+  if (!view) return undefined;
+  return { latestAt: view.lastActivityAt, status: view.state.threadState === 'active' ? 'running'
+    : view.state.lastTurnStatus === 'failed' || view.state.threadState === 'systemError' ? 'failed'
+    : view.state.lastTurnStatus ? 'completed' : 'updated' };
+}
+
 function DeviceWorkspace({
   client,
   device,
   events,
   approvals,
+  threadViews,
   connection,
   authenticated,
   relayVersion,
@@ -408,6 +419,7 @@ function DeviceWorkspace({
   device: DeviceSummary;
   events: CodexEvent[];
   approvals: ApprovalRequested[];
+  threadViews: Record<string, ThreadView>;
   connection: RelayClientState['connection'];
   authenticated: boolean;
   relayVersion?: string;
@@ -421,7 +433,7 @@ function DeviceWorkspace({
   const [threads, setThreads] = useState<CodexThreadSummary[]>([]);
   const [projects, setProjects] = useState<CodexProjectSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
-  const [threadHistory, setThreadHistory] = useState<CodexThreadReadResult>();
+  const [legacyThreadHistory, setThreadHistory] = useState<CodexThreadReadResult>();
   const [threadHistoryLoading, setThreadHistoryLoading] = useState(false);
   const [threadHistoryError, setThreadHistoryError] = useState<string>();
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>(() =>
@@ -444,6 +456,7 @@ function DeviceWorkspace({
   const [error, setError] = useState<string>();
   const [interrupting, setInterrupting] = useState(false);
   const [localEntries, setLocalEntries] = useState<ChatEntry[]>([]);
+  const [acceptedSharedSteers, setAcceptedSharedSteers] = useState<Record<string, { turnId: string; text: string }>>({});
   const [clockNow, setClockNow] = useState(() => Date.now());
   const [threadActivities, setThreadActivities] = useState<Record<string, ThreadActivityState>>(() =>
     loadThreadActivities(device.deviceId),
@@ -464,7 +477,16 @@ function DeviceWorkspace({
   const lastRefreshedCompletion = useRef<string | undefined>(undefined);
   const optimisticThreadIds = useRef(new Set<string>());
   const snapshot = device.snapshot;
-  const activeTurns = useMemo(() => reconcileActiveTurns(snapshot, events), [snapshot, events]);
+  const shared = snapshot?.sharedSession === true;
+  const sharedSupported = snapshot?.capabilities?.includes('sharedSessionV1') === true;
+  const sharedView = shared && selectedThreadId ? threadViews[selectedThreadId] : undefined;
+  const acceptedSharedSteer = !newSession && selectedThreadId ? acceptedSharedSteers[selectedThreadId] : undefined;
+  const threadHistory = shared ? sharedView?.history : legacyThreadHistory;
+  const sharedOffline = shared && (!authenticated || !device.online || connection !== 'connected' ||
+    snapshot?.connectionState !== 'online');
+  const activeTurns = useMemo(() => shared
+    ? Object.values(threadViews).flatMap((thread) => thread.activeTurn ? [thread.activeTurn] : [])
+    : reconcileActiveTurns(snapshot, events), [snapshot, events, shared, threadViews]);
   const activeTurnByThread = useMemo(
     () => new Map(activeTurns.map((turn) => [turn.threadId, turn])),
     [activeTurns],
@@ -499,6 +521,20 @@ function DeviceWorkspace({
     }
   }, [client, device.deviceId]);
 
+  useEffect(() => {
+    setAcceptedSharedSteers((current) => {
+      let next = current;
+      for (const [threadId, input] of Object.entries(current)) {
+        const state = threadViews[threadId]?.state;
+        if (state?.freshness !== 'current' || state.lastTurnId !== input.turnId ||
+            !['completed', 'failed', 'interrupted'].includes(state.lastTurnStatus ?? '')) continue;
+        if (next === current) next = { ...current };
+        delete next[threadId];
+      }
+      return next;
+    });
+  }, [acceptedSharedSteers, threadViews]);
+
   const loadThread = useCallback(async (threadId: string, background = false) => {
     const request = ++threadHistoryRequest.current;
     if (!background) {
@@ -506,6 +542,10 @@ function DeviceWorkspace({
       setThreadHistoryError(undefined);
     }
     try {
+      if (shared) {
+        await client.watchThread(device.deviceId, threadId);
+        return;
+      }
       let history: CodexThreadReadResult | undefined;
       let lastReason: unknown;
       for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -532,7 +572,7 @@ function DeviceWorkspace({
     } finally {
       if (request === threadHistoryRequest.current) setThreadHistoryLoading(false);
     }
-  }, [client, device.deviceId]);
+  }, [client, device.deviceId, shared]);
 
   const markThreadRead = useCallback((threadId: string, readAt?: number) => {
     if (!readAt) return;
@@ -550,6 +590,10 @@ function DeviceWorkspace({
   }, [authenticated, device.online, refreshThreads]);
 
   useEffect(() => {
+    if (shared && !newSession) {
+      setSessionOptionsLoading(false);
+      return;
+    }
     if (!authenticated || !device.online) {
       setSessionOptionsLoading(false);
       return;
@@ -577,7 +621,7 @@ function DeviceWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [authenticated, client, device.deviceId, device.online]);
+  }, [authenticated, client, device.deviceId, device.online, newSession, shared]);
 
   useEffect(() => {
     saveSessionPreference(device.deviceId, { model: selectedModel, approvalPolicy });
@@ -610,7 +654,7 @@ function DeviceWorkspace({
 
   useEffect(() => {
     if (!selectedThreadId || !activeTurnByThread.has(selectedThreadId)) setInterrupting(false);
-  }, [activeTurnByThread, selectedThreadId]);
+  }, [activeTurnByThread, selectedThreadId, interrupting]);
 
   useEffect(() => {
     setThreadActivities((current) => {
@@ -691,11 +735,11 @@ function DeviceWorkspace({
 
   const selectedActiveTurn = selectedThreadId ? activeTurnByThread.get(selectedThreadId) : undefined;
   const hasActiveTurn = Boolean(selectedActiveTurn);
-  const taskRunning = hasActiveTurn;
+  const taskRunning = hasActiveTurn || sharedView?.state.threadState === 'active';
   const observedSession = events.some((event) => event.threadId === selectedThreadId) ||
     (snapshot?.activeThreadId === selectedThreadId && Boolean(selectedThreadId));
   const externalSession = Boolean(
-    selectedThreadId && !selectedActiveTurn && !observedSession && !newSession,
+    !shared && selectedThreadId && !selectedActiveTurn && !observedSession && !newSession,
   );
   const runningStartedAt = readTimestamp(selectedActiveTurn?.startedAt);
   const runningElapsedMs = taskRunning && runningStartedAt !== undefined
@@ -742,12 +786,25 @@ function DeviceWorkspace({
     });
   }, [threadHistory]);
   const chatEntries = useMemo(
-    () => foldProcessEntries(mergeChatEntries(historicalEntries, localEntries, eventEntries)),
-    [eventEntries, historicalEntries, localEntries],
+    () => shared
+      ? foldProcessEntries((sharedView?.items ?? []).map((item): ChatEntry => ({
+          id: `item_${item.turnId}_${item.itemId}`, role: item.role, text: item.text, turnId: item.turnId,
+          streaming: item.streaming, occurredAt: item.occurredAt, attachments: item.attachments, changes: item.changes,
+          durationMs: resolveDurationMs(sharedView?.history?.turns.find((turn) => turn.turnId === item.turnId)),
+          meta: item.incomplete ? '内容不完整，等待同步' : item.syncing ? '正在同步完整内容' : item.streaming ? '实时回复'
+            : item.role === 'tool' ? processLabel(item.phase) : item.phase === 'commentary' ? '过程更新' : undefined,
+        })))
+      : foldProcessEntries(mergeChatEntries(historicalEntries, localEntries, eventEntries)),
+    [eventEntries, historicalEntries, localEntries, shared, sharedView],
   );
   const tailEntry = chatEntries.at(-1);
   const tailSignature = tailEntry ? `${tailEntry.id}\u0000${tailEntry.text}` : undefined;
-  const selectedActivity = selectedThreadId ? threadActivities[selectedThreadId] : undefined;
+  const selectedActivity = sharedView ? {
+    latestAt: sharedView.lastActivityAt,
+    status: sharedView.state.threadState === 'active' ? 'running'
+      : sharedView.state.lastTurnStatus === 'failed' || sharedView.state.threadState === 'systemError' ? 'failed'
+      : sharedView.state.lastTurnStatus ? 'completed' : 'updated',
+  } : selectedThreadId ? threadActivities[selectedThreadId] : undefined;
   const selectedEventCount = selectedThreadId
     ? events.filter((event) => event.threadId === selectedThreadId).length
     : 0;
@@ -830,6 +887,7 @@ function DeviceWorkspace({
   }, [isAtBottom, markThreadRead, selectedActivity, selectedThreadId]);
 
   useEffect(() => {
+    if (shared) return;
     if (!completedEvent || !selectedThreadId || lastRefreshedCompletion.current === completedEvent.eventId) return;
     const timer = window.setTimeout(() => {
       lastRefreshedCompletion.current = completedEvent.eventId;
@@ -837,7 +895,7 @@ function DeviceWorkspace({
       void refreshThreads(true);
     }, 300);
     return () => window.clearTimeout(timer);
-  }, [completedEvent, loadThread, refreshThreads, selectedThreadId]);
+  }, [completedEvent, loadThread, refreshThreads, selectedThreadId, shared]);
 
   function selectThread(threadId: string) {
     if (threadId === selectedThreadId && !newSession) {
@@ -896,13 +954,23 @@ function DeviceWorkspace({
     if (!text || busy) return;
     setBusy(true);
     setError(undefined);
-    setLocalEntries((entries) => [
+    if (!shared) setLocalEntries((entries) => [
       ...entries,
       { id: `local_${crypto.randomUUID()}`, role: 'user', text, meta: hasActiveTurn ? 'Steer' : undefined },
     ]);
     setComposer('');
     try {
-      if (selectedActiveTurn) {
+      if (shared && selectedThreadId && !newSession) {
+        if (!sharedView?.controlAllowed || sharedView.needsRecovery || sharedView.syncing || sharedOffline) {
+          throw new Error(sharedView?.policyReason ?? '会话尚未同步完成，暂时无法发送');
+        }
+        if (taskRunning && !selectedActiveTurn?.turnId) throw new Error('任务正在运行，正在同步 Turn 信息');
+        const action = await client.sendThread(device.deviceId, selectedThreadId, text, selectedActiveTurn?.turnId);
+        if (selectedActiveTurn) setAcceptedSharedSteers((current) => ({
+          ...current, [selectedThreadId]: { turnId: action.turnId, text },
+        }));
+        onNotify(taskRunning ? '干预已接受，等待当前任务处理' : '输入已接受，等待任务更新');
+      } else if (selectedActiveTurn) {
         await client.steer(
           device.deviceId,
           selectedActiveTurn.threadId,
@@ -959,7 +1027,7 @@ function DeviceWorkspace({
         setThreadHistoryError(undefined);
         onNotify('新会话已创建，真实 Turn 已启动');
       }
-      window.setTimeout(() => void refreshThreads(true), 300);
+      if (!shared) window.setTimeout(() => void refreshThreads(true), 300);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -981,14 +1049,14 @@ function DeviceWorkspace({
     : selectedThread
       ? '继续历史会话的任务'
       : '第一条任务';
-  const composerPlaceholder = hasActiveTurn
+  const composerPlaceholder = shared && selectedThreadId && !newSession ? '发送到与 Desktop 共享的会话…' : hasActiveTurn
     ? '不要修改数据库结构，只调整业务层。'
     : externalSession
       ? '恢复后将由 Codex Control Agent 托管并实时同步…'
     : selectedThread
       ? '继续这个会话…'
       : '给电脑上的 Codex 发送任务…';
-  const sendLabel = hasActiveTurn
+  const sendLabel = shared && selectedThreadId && !newSession ? hasActiveTurn ? '发送 Steer' : '发送消息' : hasActiveTurn
     ? '发送 Steer'
     : externalSession
       ? '恢复并由 Agent 托管'
@@ -1054,7 +1122,7 @@ function DeviceWorkspace({
                             key={thread.threadId}
                             thread={thread}
                             active={selectedThreadId === thread.threadId && !newSession}
-                            activity={threadActivities[thread.threadId]}
+                            activity={shared ? sharedThreadActivity(threadViews[thread.threadId]) : threadActivities[thread.threadId]}
                             readAt={readReceipts[thread.threadId]}
                             className="project-thread-link"
                             title={formatThreadTime(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt)}
@@ -1074,7 +1142,7 @@ function DeviceWorkspace({
                   key={thread.threadId}
                   thread={thread}
                   active={selectedThreadId === thread.threadId && !newSession}
-                  activity={threadActivities[thread.threadId]}
+                      activity={shared ? sharedThreadActivity(threadViews[thread.threadId]) : threadActivities[thread.threadId]}
                   readAt={readReceipts[thread.threadId]}
                   className="recent-thread-link"
                   title={`${thread.cwd ?? '无项目'} · ${formatThreadTime(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt)}`}
@@ -1110,21 +1178,26 @@ function DeviceWorkspace({
             <span>{newSession
               ? newCwd.trim() || '选择电脑上的项目目录'
               : `${selectedThread?.cwd ?? threadHistory?.cwd ?? selectedActiveTurn?.currentProject ?? device.name}` +
-                (externalSession ? ' · Desktop 外部会话（状态不可订阅）' : '')}</span>
+                (shared ? ' · 与官方 Desktop 共享' : externalSession ? ' · Desktop 外部会话（状态不可订阅）' : '')}</span>
           </div>
           <StatusPill
             online={device.online}
             status={interrupting ? 'Interrupting' : selectedActiveTurn?.status ??
               (selectedActivity?.status === 'failed' ? 'Failed' : 'Idle')}
-            label={interrupting ? '正在停止' : selectedActiveTurn?.status === 'WaitingApproval' ? '等待审批'
+            label={sharedOffline ? '连接中断，任务状态待同步'
+              : sharedView?.syncing || sharedView?.needsRecovery ? '正在同步任务状态'
+              : interrupting ? '正在停止' : sharedView?.state.waitingOnApproval || selectedActiveTurn?.status === 'WaitingApproval' ? '等待审批'
               : selectedActiveTurn?.status === 'WaitingUserInput' ? '等待输入'
               : taskRunning ? '任务正在运行' : externalSession ? 'Desktop 外部会话'
+              : sharedView?.state.lastTurnStatus === 'interrupted' ||
+                (!shared && completedEvent?.data.status === 'interrupted') ? '任务已停止'
+              : sharedView?.state.threadState === 'notLoaded' ? '会话未加载'
               : selectedActivity?.status === 'failed' ? '任务失败'
               : selectedActivity?.status === 'completed' ? '任务已完成' : 'Agent 就绪'}
           />
           <button
             className="stop-button"
-            disabled={busy || !hasActiveTurn}
+            disabled={busy || !hasActiveTurn || sharedOffline}
             onClick={() => {
               if (!selectedActiveTurn) return;
               setBusy(true);
@@ -1138,6 +1211,17 @@ function DeviceWorkspace({
             停止当前任务
           </button>
         </header>
+
+        {shared && (!sharedSupported || sharedOffline || sharedView?.needsRecovery || sharedView?.policyReason || sharedView?.error) && (
+          <div className="history-notice" role="status">
+            {!sharedSupported ? '当前 Agent 不支持共享会话协议，需要升级。'
+              : sharedOffline ? '连接中断，任务状态待同步。重新连接后会自动恢复。'
+              : sharedView?.error ?? sharedView?.policyReason ?? '正在恢复遗漏的会话更新…'}
+            {sharedView?.error && selectedThreadId && !sharedOffline && (
+              <button className="quiet-button" onClick={() => void loadThread(selectedThreadId)}>重新同步</button>
+            )}
+          </div>
+        )}
 
         {(taskRunning || displayedActivity || displayedCommand) && (
           <div className="runtime-strip">
@@ -1189,13 +1273,13 @@ function DeviceWorkspace({
             }
           }}
         >
-          {!device.online && selectedThreadId && !newSession ? (
+          {!device.online && selectedThreadId && !newSession && !sharedView?.history ? (
             <div className="history-loading" role="status">
               <span className="history-spinner" />
               <strong>正在等待电脑 Agent</strong>
               <p>Agent 恢复在线后会自动加载这个会话。</p>
             </div>
-          ) : threadHistoryLoading && selectedThreadId && !newSession ? (
+          ) : threadHistoryLoading && selectedThreadId && !newSession && !sharedView?.history ? (
             <div className="history-loading" role="status">
               <span className="history-spinner" />
               <strong>正在加载会话</strong>
@@ -1217,7 +1301,7 @@ function DeviceWorkspace({
             <div className="empty-chat compact">
               <span className="empty-mark">C</span>
               <h1>{selectedThread?.name ?? threadHistory?.name ?? selectedThread?.preview ?? '准备就绪'}</h1>
-              <p>在下方输入消息，将恢复这个历史 Thread 并开始新的 Turn。</p>
+              <p>{shared ? '在下方输入消息，继续与 Desktop 共享的会话。' : '在下方输入消息，将恢复这个历史 Thread 并开始新的 Turn。'}</p>
             </div>
           ) : (
             <div className="message-column">
@@ -1232,7 +1316,7 @@ function DeviceWorkspace({
             <ApprovalCard
               key={approval.approvalId}
               approval={approval}
-              disabled={busy}
+              disabled={busy || sharedOffline || Boolean(approval.isResolving)}
               onDecision={(decision) => {
                 setBusy(true);
                 setError(undefined);
@@ -1262,6 +1346,13 @@ function DeviceWorkspace({
         )}
 
         <div className="composer-dock">
+          {shared && acceptedSharedSteer && (
+            <div className="shared-steer-feedback" role="status" aria-label="已接受的干预">
+              <strong>干预已接受</strong>
+              <p>{acceptedSharedSteer.text}</p>
+              <small>此输入已送入当前任务，后续消息可能稍后出现。无需重复发送。</small>
+            </div>
+          )}
           {!taskRunning && !selectedThread && (
             <div className="project-picker">
               <span>⌂</span>
@@ -1275,7 +1366,9 @@ function DeviceWorkspace({
             </div>
           )}
           <form className="composer" onSubmit={submit}>
-            <div className="session-options" aria-label="会话运行选项">
+            {shared && selectedThreadId && !newSession ? (
+              <div className="session-options">沿用当前会话的模型与权限设置</div>
+            ) : <div className="session-options" aria-label="会话运行选项">
               <label>
                 <span>模型</span>
                 <select
@@ -1312,7 +1405,7 @@ function DeviceWorkspace({
                   ))}
                 </select>
               </label>
-            </div>
+            </div>}
             <label className="sr-only" htmlFor="chat-composer">{composerLabel}</label>
             <textarea
               id="chat-composer"
@@ -1329,12 +1422,15 @@ function DeviceWorkspace({
               rows={1}
             />
             <div className="composer-footer">
-              <span>{hasActiveTurn ? 'Steer 当前 Turn' : externalSession ? '恢复后切换为 Agent 托管' : selectedThread ? '恢复历史会话' : '创建新会话'}</span>
+              <span>{shared && selectedThreadId && !newSession ? hasActiveTurn ? '干预当前任务' : '共享会话'
+                : hasActiveTurn ? 'Steer 当前 Turn' : externalSession ? '恢复后切换为 Agent 托管' : selectedThread ? '恢复历史会话' : '创建新会话'}</span>
               <button
                 className="send-button"
                 aria-label={sendLabel}
                 title={sendLabel}
-                disabled={busy || !device.online || !composer.trim() || (!hasActiveTurn && !selectedThread && !newCwd.trim())}
+                disabled={busy || !device.online || !composer.trim() || (!hasActiveTurn && !selectedThread && !newCwd.trim()) ||
+                  (shared && !newSession && Boolean(selectedThreadId) && (!sharedSupported || sharedOffline || !sharedView?.controlAllowed ||
+                    sharedView.needsRecovery || sharedView.syncing || taskRunning && !selectedActiveTurn?.turnId))}
               >
                 ↑
               </button>
@@ -1454,12 +1550,10 @@ function ApprovalCard({
   disabled: boolean;
   onDecision: (decision: unknown) => void;
 }) {
-  const decisions = approval.availableDecisions.length > 0
-    ? approval.availableDecisions
-    : ['accept', 'decline', 'cancel'];
+  const decisions = approval.availableDecisions;
   return (
     <section className="approval-message" aria-label="等待审批">
-      <div className="approval-heading"><span>!</span><div><strong>等待审批</strong><small>{approval.requestMethod}</small></div></div>
+      <div className="approval-heading"><span>!</span><div><strong>{approval.isResolving ? '审批已提交，等待确认' : '等待审批'}</strong><small>{approval.requestMethod}</small></div></div>
       {approval.command && <pre>{approval.command}</pre>}
       {approval.cwd && <p>目录：{approval.cwd}</p>}
       {approval.reason && <p>{approval.reason}</p>}
@@ -1467,7 +1561,7 @@ function ApprovalCard({
         {decisions.map((decision) => (
           <button
             key={JSON.stringify(decision)}
-            disabled={disabled}
+            disabled={disabled || approval.isResolving}
             className={decisionKind(decision) === 'allow' ? 'solid-button' : 'quiet-button'}
             onClick={() => onDecision(decision)}
           >
@@ -1705,6 +1799,10 @@ function buildChatEntries(events: CodexEvent[], snapshot: CodexSnapshot | undefi
           turnId: event.turnId,
           occurredAt: event.occurredAt,
         });
+        break;
+      case 'ContentIncomplete':
+        entries.push({ id: event.eventId, role: 'system', text: '此条消息内容未完整，正在等待同步。',
+          turnId: event.turnId, occurredAt: event.occurredAt });
         break;
     }
   }

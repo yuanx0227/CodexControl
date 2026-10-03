@@ -1,6 +1,6 @@
 # Codex Control 架构
 
-状态：MVP 实现基线。
+状态：独立 stdio 模式及共享 WebSocket 模式实现基线（2026-10-03）。共享产品的真实 Desktop/网页交叉验收见 [共享接入](shared-session-implementation.md)。
 
 ## 1. 系统边界
 
@@ -8,7 +8,7 @@ Codex Control 是 Codex Session 的控制面，不是 OpenAI 身份或模型代�
 
 它负责：
 
-- 启动并持有 Managed Codex；
+- 独立模式启动 Managed Codex；共享模式连接独立宿主持有的同一个 app-server；
 - 观察 Thread、Turn、Item、Command、File Change 和 Approval；
 - 将 Codex JSON-RPC 规范化为 Snapshot/Domain Event；
 - 通过自托管 Relay 连接多个 Device 和 Controller；
@@ -20,10 +20,16 @@ Codex Control 是 Codex Session 的控制面，不是 OpenAI 身份或模型代�
 - 读取、迁移或托管 OpenAI API Key；
 - 修改用户持久化的 Model Provider、默认 Model 或 Endpoint；远程 Turn 只从 `model/list` 选择本次模型；
 - 抓取 UI、OCR、模拟输入或 Hook 私有函数；
-- 附加到 Codex Desktop 已经创建的当前会话；
+- 附加或改造原生独占 stdio Desktop 进程；共享模式需要 Desktop 从进程级 WS 入口连接已知服务；
 - 在 Relay 保存完整代码、Prompt、Response、Shell Output 或 Diff。
 
 ## 2. 总体拓扑
+
+共享模式使用 `SharedRuntimeHost → codex app-server(ws://127.0.0.1)`，官方 Desktop 与 Agent 分别建连接。宿主、Agent 与官方 Desktop 仍是独立生命周期；宿主和 Agent 均由同一 `CodexControlAgent.exe` 的不同模式提供。Agent 不会在共享连接失败时回退到新的 stdio 执行者，也不开放旧 TUI 代理。服务身份由 PID、精确创建时间、镜像、CLI 版本和监听归属联合验证。
+
+`SharedSessionOperations` 通过公开无覆盖 `thread/resume` 观察活动 Thread，输入按 `expectedTurnId` 分为 Steer/闲置启动。`CodexStateManager` 分别维护 Thread、Turn 和连接状态；`SessionEventJournal` 给所有领域事件分配独立序号，环内按游标重放，缺口触发一次快照恢复。PWA `ThreadStore` 按 Device/Thread/Turn/Item 归并并去重。审批以服务端 resolved 为最终结果，响应写入成功仅表示正在处理。
+
+下图为保留的独立 stdio 模式：
 
 ```text
 Codex TUI
@@ -76,7 +82,7 @@ codex app-server --help
 
 ### 3.2 AppServerBridge
 
-- 独占 app-server stdin/stdout；
+- 独立模式独占 app-server stdin/stdout；共享模式只持有独立WS客户端连接；
 - stdout 只处理 JSONL，stderr 独立排空且默认不记录正文；
 - 单 Writer Queue 防止 JSON 交错；
 - 内部 Request ID 使用 `bridge:<UUID>`；
@@ -268,7 +274,7 @@ Relay 不持久化完整事件流，只保存最新 Snapshot 和必要审计元�
 
 `item/agentMessage/delta` 被规范化为 `AgentMessageDelta`，PWA 按 `itemId` 合并到同一助手消息并立即显示；闪烁光标提供打字机反馈。0.6.0 起不再周期读取完整历史：Agent 托管会话只消费同一 app-server 推送的 Thread、Turn、Item 和 Approval Domain Events，Turn 完成后仅执行一次有界历史核对。最终正文使用不执行原始 HTML 的 GFM Markdown。`Command/File` 过程按 Turn 合并进默认关闭的摘要；文件 diff 只统计新增/删除行并显示每文件及总计，不传完整 diff。
 
-独立 Agent 无法订阅另一个 Codex Desktop app-server 进程内部的事件。此类 Thread 显示为“Desktop 外部会话（状态不可订阅）”，只在用户明确打开或手动刷新时读取历史；用户从 PWA 恢复后，它才成为 Agent 托管会话并进入事件驱动链路。PWA 按 Thread 保存无正文的活动时间/状态和已读时间，派生运行、未读、完成未读与失败未读标志。
+保留的独立模式无法订阅另一个 Codex Desktop app-server 进程内部的事件。此类 Thread 显示为“Desktop 外部会话（状态不可订阅）”，只在用户明确打开或手动刷新时读取历史；用户从 PWA 恢复后，它才成为 Agent 托管会话并进入事件驱动链路。共享模式通过同一WS服务的watch/send与实时领域事件操作现有Thread，不采用此接管路径。PWA 按 Thread 保存无正文的活动时间/状态和已读时间，派生运行、未读、完成未读与失败未读标志。
 
 会话同步修复补齐 `thread/status/changed` 和用户消息 Item 的 Domain Events。网页根据 Snapshot 与后续生命周期事件同步运行、等待审批和等待输入状态；历史正文与流式消息按 Thread/Turn/Item 身份合并，同文的不同轮次不会被去重。这些修复适用于 Agent 所连接的 app-server；它们不提供官方 Desktop 与独立 Agent 对同一会话的共享连接，也不解决两进程间的会话占用。官方 Desktop 的同会话实时双端交互仍需可用的公开共享 app-server 通道，不能由历史读取或私有连接替代。
 

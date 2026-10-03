@@ -7,6 +7,7 @@ View, create, and control Codex sessions on Windows from your phone or browser. 
 - Live responses, session history, and concurrent sessions.
 - Send instructions, interrupt tasks, and handle approvals.
 - Windows system tray, QR pairing, and mobile / desktop browsers.
+- Optional shared mode: use the same session from official Codex Desktop and the web app.
 
 ## Screenshots
 
@@ -57,6 +58,18 @@ Preserve `.env`, certificates, and the `relay-data` volume across upgrades.
 3. Confirm full control or view only on the computer.
 4. Select a session in the web app or create a task in an existing project directory.
 
-Agent-managed sessions support live control. External Codex Desktop sessions support history reads on demand.
+In the default independent mode, Agent-managed sessions support live control. External sessions opened by the native Codex Desktop launcher support history reads on demand.
+
+## Shared session mode (experimental)
+
+Connect official Codex Desktop and the Agent to the same local `codex app-server` WebSocket service to use one session from both clients: live messages in both directions, additional instructions during a turn (Steer), manual approvals, and task interruption.
+
+1. Follow the [shared mode setup guide](docs/shared-session-implementation.md#当前账户的使用入口) to prepare the service and its identity manifest, then open official Desktop through the shared launcher.
+2. In the Agent's advanced settings, enter the shared service URL and identity manifest path. Add absolute project directories that the web app may control, separated by semicolons.
+3. Save and reconnect, then select the session in the web app.
+
+The shared URL must use `ws://127.0.0.1:<port>`. Project directories require explicit authorization on the computer; new remote work is disabled by default. Existing sessions retain their model and permissions, and approvals require a human decision. Closing the web app, Agent, or Desktop disconnects that client while the shared service continues the task. Use the session's stop button to interrupt it.
+
+Installing an update does not switch to shared mode automatically. Exit Desktop's windows and system tray before changing its launcher. See the [implementation record](docs/shared-session-implementation.md) for setup, rollback, tested versions, and remaining acceptance checks.
 
 [Development and local setup](docs/development.md) · [Architecture](docs/architecture.md) · [Security](docs/security.md) · [Changelog](CHANGELOG.md)

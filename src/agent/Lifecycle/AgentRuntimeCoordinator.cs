@@ -22,6 +22,7 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
     private readonly SemaphoreSlim _restartSignal = new(0, 1);
     private readonly CancellationTokenSource _lifetime = new();
     private readonly object _snapshotGate = new();
+    private readonly SharedSessionRuntimeContext _sharedRuntime = new();
 
     private AgentOptions _options;
     private AgentLog? _log;
@@ -171,13 +172,13 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
 
     public bool RequestRestart(bool force)
     {
-        var activeTurn = Snapshot.Codex.ActiveTurnId is not null;
+        var activeTurn = _bridge?.IsSharedSession != true && Snapshot.Codex.ActiveTurnId is not null;
         _restartPending = true;
         Publish(snapshot => snapshot with
         {
             CoreStatus = RuntimeCoreStatus.RestartPending,
             RestartPending = true,
-            Summary = activeTurn && !force ? "当前任务完成后重启" : "正在重启 Codex 内核",
+            Summary = _options.SharedEndpoint is not null ? "正在重新连接共享服务" : activeTurn && !force ? "当前任务完成后重启" : "正在重启 Codex 内核",
         });
         if (!activeTurn || force)
         {
@@ -197,6 +198,8 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
 
     public void OpenLocalTerminal()
     {
+        if (_options.SharedEndpoint is not null)
+            throw new AgentException("SHARED_DESKTOP_ENTRY_REQUIRED", "共享模式请使用官方 Desktop 的共享启动入口。");
         var snapshot = Snapshot;
         if (snapshot.CoreStatus != RuntimeCoreStatus.Ready || snapshot.LocalProxyUri is null)
         {
@@ -280,37 +283,61 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
                 Summary = "正在查找 Codex",
                 LastError = null,
             });
-            var runtime = await CodexRuntimeResolver.ResolveAsync(
-                _options.CodexPath,
-                _paths.DataDirectory,
-                cancellationToken).ConfigureAwait(false);
-            _options = _options with { CodexPath = runtime.ExecutablePath };
-            _log!.Info(
-                "codex_runtime_resolved",
-                $"Codex runtime source={runtime.Source}; staged={runtime.WasStaged}; " +
-                $"package={runtime.DesktopPackageName ?? "none"}");
+            if (_options.SharedEndpoint is not null)
+            {
+                var identity = await SharedServiceIdentity.ReadAndVerifyAsync(_options.SharedManifestPath!, _options.SharedEndpoint, cancellationToken).ConfigureAwait(false);
+                _options = _options with { CodexPath = identity.ImagePath };
+                Publish(snapshot => snapshot with { CodexPath = identity.ImagePath, CodexVersion = identity.Version, IsSharedSession = true, ServiceInstanceId = identity.ServiceInstanceId });
+            }
+            else
+            {
+                var runtime = await CodexRuntimeResolver.ResolveAsync(
+                    _options.CodexPath,
+                    _paths.DataDirectory,
+                    cancellationToken).ConfigureAwait(false);
+                _options = _options with { CodexPath = runtime.ExecutablePath };
+                _log!.Info(
+                    "codex_runtime_resolved",
+                    $"Codex runtime source={runtime.Source}; staged={runtime.WasStaged}; " +
+                    $"package={runtime.DesktopPackageName ?? "none"}");
 
-            Publish(snapshot => snapshot with
-            {
-                CoreStatus = RuntimeCoreStatus.Probing,
-                Summary = "正在检查 Codex 能力",
-                CodexPath = runtime.ExecutablePath,
-            });
-            var probe = await CodexExecutableProbe.ProbeAsync(
-                runtime.ExecutablePath,
-                cancellationToken).ConfigureAwait(false);
-            _log.Info("codex_probe_succeeded", $"Codex capability probe succeeded; version={probe.Version}");
-            Publish(snapshot => snapshot with
-            {
-                CodexPath = runtime.ExecutablePath,
-                CodexVersion = probe.Version,
-            });
+                Publish(snapshot => snapshot with
+                {
+                    CoreStatus = RuntimeCoreStatus.Probing,
+                    Summary = "正在检查 Codex 能力",
+                    CodexPath = runtime.ExecutablePath,
+                });
+                var probe = await CodexExecutableProbe.ProbeAsync(
+                    runtime.ExecutablePath,
+                    cancellationToken).ConfigureAwait(false);
+                _log.Info("codex_probe_succeeded", $"Codex capability probe succeeded; version={probe.Version}");
+                Publish(snapshot => snapshot with
+                {
+                    CodexPath = runtime.ExecutablePath,
+                    CodexVersion = probe.Version,
+                });
+            }
 
             var restartAttempt = 0;
             while (!cancellationToken.IsCancellationRequested)
             {
                 var startedAt = DateTimeOffset.UtcNow;
-                await StartCoreAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await StartCoreAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception) when (_options.SharedEndpoint is not null && !cancellationToken.IsCancellationRequested)
+                {
+                    await StopCoreAsync(CancellationToken.None).ConfigureAwait(false);
+                    var reconnectDelay = RestartSeconds[Math.Min(restartAttempt++, RestartSeconds.Length - 1)];
+                    Publish(snapshot => snapshot with
+                    {
+                        CoreStatus = RuntimeCoreStatus.Failed,
+                        Summary = $"共享连接中断，{reconnectDelay} 秒后重新核实服务身份",
+                    });
+                    await Task.Delay(TimeSpan.FromSeconds(reconnectDelay), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
                 var bridge = _bridge ?? throw new InvalidOperationException("Bridge was not created.");
                 using var restartWait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var restartTask = _restartSignal.WaitAsync(restartWait.Token);
@@ -322,7 +349,7 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
                 if (ReferenceEquals(completed, bridge.Completion))
                 {
                     var exitCode = await bridge.Completion.ConfigureAwait(false);
-                    _log.Error("app_server_session_failed", $"app-server exited unexpectedly; code={exitCode}");
+                    _log!.Error("app_server_session_failed", $"app-server exited unexpectedly; code={exitCode}");
                 }
 
                 await StopCoreAsync(CancellationToken.None).ConfigureAwait(false);
@@ -392,7 +419,7 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
             Publish(snapshot => snapshot with
             {
                 CoreStatus = RuntimeCoreStatus.Starting,
-                Summary = "正在启动 Codex 内核",
+                Summary = _options.SharedEndpoint is null ? "正在启动 Codex 内核" : "正在连接共享服务",
                 RestartPending = false,
                 LastError = null,
             });
@@ -409,13 +436,15 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
                 _identity = DeviceIdentity.LoadOrCreate(_paths.DataDirectory, _options.DeviceName);
             }
             await bridge.StartAsync(cancellationToken).ConfigureAwait(false);
-            await proxy.StartAsync(cancellationToken).ConfigureAwait(false);
+            if (!bridge.IsSharedSession) await proxy.StartAsync(cancellationToken).ConfigureAwait(false);
             await StartRelayLockedAsync().ConfigureAwait(false);
             Publish(snapshot => snapshot with
             {
                 CoreStatus = RuntimeCoreStatus.Ready,
                 Summary = ResolveSummary(RuntimeCoreStatus.Ready, snapshot.RelayStatus),
-                LocalProxyUri = proxy.WebSocketUri,
+                LocalProxyUri = bridge.IsSharedSession ? null : proxy.WebSocketUri,
+                IsSharedSession = bridge.IsSharedSession,
+                ServiceInstanceId = bridge.ServiceInstanceId,
                 RestartPending = false,
                 Codex = state.Snapshot,
             });
@@ -439,7 +468,7 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
             Publish(snapshot => snapshot with
             {
                 CoreStatus = RuntimeCoreStatus.Stopping,
-                Summary = "正在停止 Codex 内核",
+                Summary = _bridge?.IsSharedSession == true ? "正在断开共享服务连接，任务继续运行" : "正在停止 Codex 内核",
             });
             await StopRelayLockedAsync().ConfigureAwait(false);
             if (_proxy is not null)
@@ -509,7 +538,7 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
             return Task.CompletedTask;
         }
 
-        var dispatcher = new RemoteControlDispatcher(_bridge, _state);
+        var dispatcher = new RemoteControlDispatcher(_bridge, _state, _sharedRuntime);
         var pendingRevocations = _stateStore.Load().PendingPairingRevocations;
         _relay = new RelayClient(
             _options,
@@ -519,7 +548,8 @@ public sealed class AgentRuntimeCoordinator : IAsyncDisposable
             dispatcher,
             _log!,
             pendingRevocations,
-            pairingId => _stateStore.RemoveRevocation(pairingId));
+            pairingId => _stateStore.RemoveRevocation(pairingId),
+            _sharedRuntime);
         _relay.PairingConfirmationRequested += OnPairingConfirmationRequested;
         _relay.Start();
         Publish(snapshot => snapshot with

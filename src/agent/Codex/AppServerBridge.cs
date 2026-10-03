@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -11,7 +12,7 @@ using CodexControl.Agent.State;
 namespace CodexControl.Agent.Codex;
 
 /// <summary>
-/// 独占 app-server stdio 连接，完成唯一握手并路由 TUI 与 Agent 内部请求。
+/// Owns an independent stdio process, or only a client connection to a verified shared WS service.
 /// </summary>
 public sealed class AppServerBridge : IAsyncDisposable
 {
@@ -32,6 +33,7 @@ public sealed class AppServerBridge : IAsyncDisposable
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private Process? _process;
+    private ClientWebSocket? _sharedSocket;
     private Task? _stdoutTask;
     private Task? _stderrTask;
     private Task? _writerTask;
@@ -48,7 +50,9 @@ public sealed class AppServerBridge : IAsyncDisposable
         _options = options;
         _log = log;
         _state = state;
-        Approvals = new ApprovalCoordinator(QueueOutboundAsync, log);
+        AuthorizedProjectRoots = SharedProjectAuthorization.Validate(options.SharedProjectRoots);
+        _state.AwaitServerResolution = IsSharedSession;
+        Approvals = new ApprovalCoordinator(QueueOutboundAsync, log, awaitServerResolution: IsSharedSession);
         _outbound = Channel.CreateBounded<string>(new BoundedChannelOptions(512)
         {
             SingleReader = true,
@@ -59,6 +63,11 @@ public sealed class AppServerBridge : IAsyncDisposable
     }
 
     public bool IsReady => Volatile.Read(ref _ready) != 0;
+    public bool IsSharedSession => _options.SharedEndpoint is not null;
+    public string ServiceInstanceId { get; private set; } = string.Empty;
+    public string ConnectionEpoch { get; } = Guid.NewGuid().ToString("N");
+    public IReadOnlyList<string> AuthorizedProjectRoots { get; }
+    public bool AllowStandardTemporaryDirectories => _options.SharedAllowStandardTemporaryDirectories;
 
     public ApprovalCoordinator Approvals { get; }
 
@@ -78,15 +87,34 @@ public sealed class AppServerBridge : IAsyncDisposable
             throw new InvalidOperationException("AppServerBridge 只能启动一次。");
         }
 
-        _state.MarkStarting();
-        _process = StartProcess();
-        _writerTask = WriterLoopAsync(_lifetime.Token);
-        _stdoutTask = StdoutLoopAsync(_lifetime.Token);
-        _stderrTask = StderrLoopAsync(_lifetime.Token);
-        _monitorTask = MonitorProcessAsync();
-
         try
         {
+            Approvals.BeginConnection();
+            if (IsSharedSession)
+            {
+                _state.MarkConnectionState("connecting");
+                var identity = await SharedServiceIdentity.ReadAndVerifyAsync(
+                    _options.SharedManifestPath ?? throw new AgentConfigurationException("共享模式缺少身份文件。"),
+                    _options.SharedEndpoint!, cancellationToken).ConfigureAwait(false);
+                _sharedSocket = new ClientWebSocket();
+                _sharedSocket.Options.Proxy = null;
+                await _sharedSocket.ConnectAsync(_options.SharedEndpoint!, cancellationToken)
+                    .WaitAsync(InitializeTimeout, cancellationToken).ConfigureAwait(false);
+                identity.Verify();
+                ServiceInstanceId = identity.ServiceInstanceId;
+                _writerTask = SharedWriterLoopAsync(_lifetime.Token);
+                _stdoutTask = SharedReaderLoopAsync(_lifetime.Token);
+            }
+            else
+            {
+                _state.MarkStarting();
+                _process = StartProcess();
+                ServiceInstanceId = $"stdio-{_process.Id}-{_process.StartTime.ToUniversalTime().Ticks}";
+                _writerTask = WriterLoopAsync(_lifetime.Token);
+                _stdoutTask = StdoutLoopAsync(_lifetime.Token);
+                _stderrTask = StderrLoopAsync(_lifetime.Token);
+                _monitorTask = MonitorProcessAsync();
+            }
             var initializeReply = await SendInternalRequestAsync(
                 "initialize",
                 new
@@ -117,8 +145,11 @@ public sealed class AppServerBridge : IAsyncDisposable
                 JsonRpcProtocol.BuildNotification("initialized"),
                 cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _ready, 1);
-            _state.MarkIdle();
-            _log.Info("app_server_ready", "app-server stdio initialize/initialized succeeded");
+            if (IsSharedSession) _state.MarkConnectionState("online");
+            else _state.MarkIdle();
+            _log.Info("app_server_ready", IsSharedSession
+                ? "shared app-server client initialized; service lifecycle is independent"
+                : "app-server stdio initialize/initialized succeeded");
         }
         catch
         {
@@ -132,7 +163,7 @@ public sealed class AppServerBridge : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(client);
         lock (_clientGate)
         {
-            if (_client is not null || !IsReady)
+            if (IsSharedSession || _client is not null || !IsReady)
             {
                 return false;
             }
@@ -218,6 +249,21 @@ public sealed class AppServerBridge : IAsyncDisposable
             AbortClient("Agent is shutting down");
             _outbound.Writer.TryComplete();
 
+            if (IsSharedSession)
+            {
+                // Never close stdin, kill, or wait on a shared executor's lifetime.
+                _lifetime.Cancel();
+                _sharedSocket?.Abort();
+                await AwaitBackgroundTasksAsync().ConfigureAwait(false);
+                Approvals.ResetConnection();
+                _state.ResetConnectionApprovals();
+                FailPending(new AgentException(AgentErrorCodes.AppServerDisconnected, "共享服务连接已断开，服务继续运行。"));
+                _state.MarkConnectionState("offline");
+                _completion.TrySetResult(0);
+                _log.Info("shared_client_disconnected", "shared client disconnected; service left running");
+                return;
+            }
+
             if (_writerTask is not null)
             {
                 await IgnoreCancellationAsync(
@@ -271,6 +317,7 @@ public sealed class AppServerBridge : IAsyncDisposable
 
         await StopAsync(CancellationToken.None).ConfigureAwait(false);
         _process?.Dispose();
+        _sharedSocket?.Dispose();
         _lifetime.Dispose();
         _stopGate.Dispose();
     }
@@ -319,6 +366,63 @@ public sealed class AppServerBridge : IAsyncDisposable
 
         _log.Info("app_server_started", $"app-server started; pid={process.Id}");
         return process;
+    }
+
+    private async Task SharedWriterLoopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var message in _outbound.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            {
+                await _sharedSocket!.SendAsync(Encoding.UTF8.GetBytes(message).AsMemory(),
+                    WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception) { SharedDisconnected(); }
+    }
+
+    private async Task SharedReaderLoopAsync(CancellationToken cancellationToken)
+    {
+        var buffer = new byte[32 * 1024];
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                using var message = new MemoryStream();
+                ValueWebSocketReceiveResult frame;
+                do
+                {
+                    frame = await _sharedSocket!.ReceiveAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+                    if (frame.MessageType == WebSocketMessageType.Close) return;
+                    if (frame.MessageType != WebSocketMessageType.Text ||
+                        message.Length + frame.Count > Math.Max(_options.MaxMessageBytes, MinimumAppServerMessageBytes))
+                        throw new AgentException(AgentErrorCodes.AppServerProtocolError, "共享服务返回无效或过大的消息。");
+                    message.Write(buffer, 0, frame.Count);
+                } while (!frame.EndOfMessage);
+                DispatchServerMessage(new UTF8Encoding(false, true).GetString(message.GetBuffer(), 0, checked((int)message.Length)));
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            // No raw payload, endpoint credential or exception message is written to the log.
+            _log.Warning("shared_client_read_failed", "shared client stream ended; reconnect requires identity verification");
+        }
+        finally { SharedDisconnected(); }
+    }
+
+    private void SharedDisconnected()
+    {
+        Volatile.Write(ref _ready, 0);
+        _lifetime.Cancel();
+        _sharedSocket?.Abort();
+        _outbound.Writer.TryComplete();
+        FailPending(new AgentException(AgentErrorCodes.AppServerDisconnected, "共享服务连接已中断，未停止服务。"));
+        Approvals.ResetConnection();
+        _state.ResetConnectionApprovals();
+        _state.MarkConnectionState("offline");
+        _completion.TrySetResult(Volatile.Read(ref _stopping) == 0 ? 1 : 0);
     }
 
     private async Task<RpcReply> SendInternalRequestAsync(

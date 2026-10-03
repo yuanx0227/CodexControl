@@ -26,6 +26,10 @@ public sealed record AgentSettings(
     string Theme)
 {
     public const int CurrentSchemaVersion = 1;
+    public string? SharedEndpoint { get; init; }
+    public string? SharedManifestPath { get; init; }
+    public IReadOnlyList<string> SharedProjectRoots { get; init; } = [];
+    public bool SharedAllowStandardTemporaryDirectories { get; init; }
 
     public static AgentSettings Default { get; } = new(
         CurrentSchemaVersion,
@@ -57,6 +61,12 @@ public sealed record AgentSettings(
         }
 
         var relayRoot = NormalizeRelayRoot(RelayRootUrl);
+        if (string.IsNullOrWhiteSpace(SharedEndpoint) != string.IsNullOrWhiteSpace(SharedManifestPath))
+        {
+            throw new AgentConfigurationException("共享服务地址和身份文件必须同时设置。");
+        }
+        var sharedEndpoint = string.IsNullOrWhiteSpace(SharedEndpoint)
+            ? null : AgentOptions.ParseSharedEndpoint(SharedEndpoint.Trim()).ToString();
         if (CodexPathMode == CodexPathMode.Manual && string.IsNullOrWhiteSpace(CodexPath))
         {
             throw new AgentConfigurationException("手动 Codex 路径不能为空。");
@@ -80,6 +90,9 @@ public sealed record AgentSettings(
             CodexPath = string.IsNullOrWhiteSpace(CodexPath) ? null : CodexPath.Trim(),
             FixedPort = LocalPortMode == LocalPortMode.Fixed ? FixedPort : null,
             Theme = "system",
+            SharedEndpoint = sharedEndpoint,
+            SharedManifestPath = sharedEndpoint is null ? null : Path.GetFullPath(SharedManifestPath!),
+            SharedProjectRoots = SharedProjectAuthorization.Validate(SharedProjectRoots),
         };
     }
 

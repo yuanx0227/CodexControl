@@ -42,7 +42,9 @@ public sealed record CodexThreadHistoryEntryPayload(
     string Text,
     string? Phase,
     IReadOnlyList<CodexThreadHistoryAttachmentPayload> Attachments,
-    IReadOnlyList<CodexThreadHistoryFileChangePayload> Changes);
+    IReadOnlyList<CodexThreadHistoryFileChangePayload> Changes,
+    bool Truncated = false,
+    int? OriginalLength = null);
 
 public sealed record CodexThreadHistoryAttachmentPayload(
     string Kind,
@@ -121,7 +123,23 @@ public sealed record CodexSnapshotPayload(
     string? LastAgentMessage,
     string? LastError,
     string? AgentVersion = null,
-    IReadOnlyList<CodexActiveTurnPayload>? ActiveTurns = null);
+    IReadOnlyList<CodexActiveTurnPayload>? ActiveTurns = null,
+    string? ServiceInstanceId = null,
+    string? StreamEpoch = null,
+    long? LastSequence = null,
+    bool SharedSession = false,
+    string? ConnectionState = null,
+    IReadOnlyList<string>? Capabilities = null,
+    IReadOnlyList<CodexThreadStatePayload>? Threads = null);
+
+public sealed record CodexThreadStatePayload(string ThreadId, string ThreadState, string? ActiveTurnId,
+    string? LastTurnId, string? LastTurnStatus, string? Activity, bool WaitingOnApproval,
+    bool WaitingOnUserInput, string Freshness);
+
+public sealed record ThreadWatchResultPayload(string ThreadId, string ServiceInstanceId, string StreamEpoch,
+    long Sequence, CodexThreadReadResultPayload History, CodexSnapshotPayload Snapshot,
+    IReadOnlyList<ApprovalRequestedPayload> Approvals, IReadOnlyList<CodexEventPayload> Events,
+    bool ResyncRequired, bool ControlAllowed, string? PolicyReason = null);
 
 public sealed record CodexEventPayload(
     string EventId,
@@ -131,7 +149,10 @@ public sealed record CodexEventPayload(
     string? TurnId,
     string? ItemId,
     long OccurredAt,
-    JsonElement Data);
+    JsonElement Data,
+    string? ServiceInstanceId = null,
+    string? StreamEpoch = null,
+    long? Sequence = null);
 
 public sealed record ApprovalRequestedPayload(
     string ApprovalId,
@@ -143,7 +164,8 @@ public sealed record ApprovalRequestedPayload(
     string? Cwd,
     string? Reason,
     IReadOnlyList<JsonElement> AvailableDecisions,
-    long RequestedAt);
+    long RequestedAt,
+    bool IsResolving = false);
 
 public sealed record ApprovalResolvedPayload(
     string ApprovalId,

@@ -53,13 +53,15 @@ public sealed class RemoteControlDispatcher
 
     private readonly AppServerBridge _bridge;
     private readonly CodexStateManager _state;
+    public SharedSessionOperations SharedSessions { get; }
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _threadMutationGates =
         new(StringComparer.Ordinal);
 
-    public RemoteControlDispatcher(AppServerBridge bridge, CodexStateManager state)
+    public RemoteControlDispatcher(AppServerBridge bridge, CodexStateManager state, SharedSessionRuntimeContext? runtimeContext = null)
     {
         _bridge = bridge;
         _state = state;
+        SharedSessions = new SharedSessionOperations(bridge, state, runtimeContext);
     }
 
     public async Task<ControlDispatchResult> SteerAsync(
@@ -68,6 +70,8 @@ public sealed class RemoteControlDispatcher
         string text,
         CancellationToken cancellationToken)
     {
+        if (_bridge.IsSharedSession)
+            return await SharedSessions.SendAsync(threadId, text, expectedTurnId, cancellationToken).ConfigureAwait(false);
         var snapshot = _state.Snapshot;
         var active = FindActiveTurn(snapshot, threadId);
         if (active is null)
@@ -352,9 +356,34 @@ public sealed class RemoteControlDispatcher
                     return Failure("PROJECT_NOT_FOUND", "电脑上不存在指定项目目录。");
                 }
 
-                var thread = await _bridge.SendRequestAsync(
-                    "thread/start",
-                    new
+                if (_bridge.IsSharedSession && !_bridge.AuthorizedProjectRoots.Any(root =>
+                    ThreadWorkspacePolicy.IsWithinDirectory(fullCwd, root)))
+                {
+                    return Failure("PROJECT_NOT_AUTHORIZED", "项目尚未获得本机共享授权；未创建会话或发送任务。");
+                }
+
+                object parameters = _bridge.IsSharedSession
+                    ? new
+                    {
+                        cwd = fullCwd,
+                        runtimeWorkspaceRoots = new[] { fullCwd },
+                        ephemeral = false,
+                        historyMode = "paginated",
+                        model = selectedModel,
+                        approvalPolicy = selectedApprovalPolicy,
+                        approvalsReviewer = "user",
+                        sandbox = "workspace-write",
+                        config = new
+                        {
+                            sandbox_workspace_write = new
+                            {
+                                writable_roots = new[] { fullCwd }, network_access = false,
+                                exclude_tmpdir_env_var = true, exclude_slash_tmp = true,
+                            },
+                        },
+                        serviceName = "codex_control_remote",
+                    }
+                    : new
                     {
                         cwd = fullCwd,
                         ephemeral = false,
@@ -362,10 +391,19 @@ public sealed class RemoteControlDispatcher
                         approvalPolicy = selectedApprovalPolicy,
                         sandbox = "workspace-write",
                         serviceName = "codex_control_remote",
-                    },
+                    };
+                var thread = await _bridge.SendRequestAsync(
+                    "thread/start",
+                    parameters,
                     ThreadMutationTimeout,
                     token).ConfigureAwait(false);
                 var threadId = ReadRequiredId(thread, "thread", "thread/start");
+                if (_bridge.IsSharedSession)
+                {
+                    var reason = SharedSessions.ObserveCreatedThread(thread, threadId, fullCwd);
+                    if (reason is not null)
+                        return Failure(reason, "新会话有效权限未通过核实，未发送任务。");
+                }
                 return await StartTurnCoreAsync(
                     threadId,
                     text,
@@ -390,6 +428,8 @@ public sealed class RemoteControlDispatcher
         string? approvalPolicy,
         CancellationToken cancellationToken)
     {
+        if (_bridge.IsSharedSession)
+            return SharedSessions.SendAsync(threadId, text, null, cancellationToken);
         var configurationFailure = ValidateSessionConfiguration(
             model,
             approvalPolicy,
@@ -475,6 +515,19 @@ public sealed class RemoteControlDispatcher
     {
         try
         {
+            var negativeDecision = decision.ValueKind == JsonValueKind.String &&
+                decision.GetString() is "decline" or "cancel";
+            if (_bridge.IsSharedSession && !negativeDecision)
+            {
+                var pending = _bridge.Approvals.PendingApprovals.FirstOrDefault(value => value.ApprovalId == approvalId);
+                if (pending?.ThreadId is null)
+                    return Failure("APPROVAL_SCOPE_UNKNOWN", "无法核实审批所属会话，未发送批准决定。");
+                // An approval-only controller cannot activate an unobserved Thread.
+                var (_, reason) = await SharedSessions.JoinAsync(pending.ThreadId, cancellationToken, allowJoin: false)
+                    .ConfigureAwait(false);
+                if (reason is not null)
+                    return Failure(reason, "当前会话权限需要核实；仍可拒绝或取消该请求。");
+            }
             var resolution = await _bridge.Approvals.ResolveRemoteAsync(
                 approvalId,
                 decision,

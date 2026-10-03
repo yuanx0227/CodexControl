@@ -24,6 +24,11 @@ public sealed record ThreadListControlPayload(
 public sealed record ThreadReadControlPayload(
     string ThreadId);
 
+public sealed record ThreadWatchControlPayload(string ThreadId, string? StreamEpoch = null, long? AfterSequence = null,
+    bool AllowJoin = false);
+public sealed record ThreadUnwatchControlPayload(string ThreadId);
+public sealed record ThreadSendControlPayload(string ThreadId, string Text, string? ExpectedTurnId = null);
+
 public sealed record ThreadStartControlPayload(
     string Cwd,
     string Text,

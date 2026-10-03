@@ -242,10 +242,12 @@ internal static class RelayTestRunner
                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     "D:\\Projects\\Vision", "Running tests", "dotnet test", [], 0, null, null),
-            ]);
+            ], ServiceInstanceId: "service-test", StreamEpoch: "stream-test", LastSequence: 0,
+            SharedSession: true, ConnectionState: "online",
+            Threads: [new("thr-1", "active", "turn-1", null, null, "thinking", false, false, "current")]);
         await device.SendAsync(RelayEnvelope.Create(
             RelayMessageTypes.CodexSnapshot,
-            snapshot,
+            snapshot with { LastAgentMessage = "private-response-marker", RunningCommand = "private-command-marker" },
             deviceId: device.PrincipalId)).ConfigureAwait(false);
         var forwardedSnapshot = (await controller.ReceiveAsync(RelayMessageTypes.CodexSnapshot)
             .ConfigureAwait(false)).ReadPayload<CodexSnapshotPayload>();
@@ -255,6 +257,16 @@ internal static class RelayTestRunner
         var secondTabSnapshot = (await secondControllerTab.ReceiveAsync(RelayMessageTypes.CodexSnapshot)
             .ConfigureAwait(false)).ReadPayload<CodexSnapshotPayload>();
         Assert(secondTabSnapshot.Revision == 1, "snapshot should reach every tab for the controller identity");
+        Assert(forwardedSnapshot.SharedSession && forwardedSnapshot.StreamEpoch == "stream-test" &&
+               forwardedSnapshot.Threads?.Single().ActiveTurnId == "turn-1" &&
+               forwardedSnapshot.LastAgentMessage == "private-response-marker", "live shared metadata and content should reach the browser");
+        await using (var db = await app.Services.GetRequiredService<IDbContextFactory<RelayDbContext>>().CreateDbContextAsync())
+        {
+            var saved = (await db.Devices.FindAsync(device.PrincipalId))!.LatestSnapshotJson!;
+            Assert(!saved.Contains("private-response-marker") && !saved.Contains("private-command-marker") &&
+                   !saved.Contains("dotnet test"), "persistent snapshots must omit assistant and command bodies");
+            Assert(saved.Contains("stream-test"), "operational stream identity may be persisted");
+        }
 
         foreach (var kind in new[] { "ThreadStatusChanged", "UserMessageCompleted" })
         {
@@ -262,7 +274,8 @@ internal static class RelayTestRunner
                 ? JsonSerializer.SerializeToElement(new { status = "active", activeFlags = new[] { "waitingOnUserInput" } })
                 : JsonSerializer.SerializeToElement(new { text = "message from another client", attachments = Array.Empty<object>() });
             var domainEvent = new CodexEventPayload(Guid.NewGuid().ToString("N"), 1, kind,
-                "thr-1", "turn-1", "item-sync", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), data);
+                "thr-1", "turn-1", "item-sync", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), data,
+                "service-test", "stream-test", kind == "ThreadStatusChanged" ? 1 : 2);
             await device.SendAsync(RelayEnvelope.Create(RelayMessageTypes.CodexEvent, domainEvent,
                 deviceId: device.PrincipalId)).ConfigureAwait(false);
             foreach (var tab in new[] { controller, secondControllerTab })
@@ -270,7 +283,8 @@ internal static class RelayTestRunner
                 var forwarded = (await tab.ReceiveAsync(RelayMessageTypes.CodexEvent).ConfigureAwait(false))
                     .ReadPayload<CodexEventPayload>();
                 Assert(forwarded.Kind == kind && forwarded.EventId == domainEvent.EventId &&
-                       forwarded.Data.GetRawText() == data.GetRawText(),
+                       forwarded.Data.GetRawText() == data.GetRawText() && forwarded.Sequence == domainEvent.Sequence &&
+                       forwarded.StreamEpoch == "stream-test" && forwarded.ServiceInstanceId == "service-test",
                     "normalized status and user messages must reach every controller tab unchanged");
             }
         }
@@ -301,6 +315,9 @@ internal static class RelayTestRunner
                      (RelayMessageTypes.ControlSessionOptions, new SessionOptionsControlPayload()),
                      (RelayMessageTypes.ControlThreadList, new ThreadListControlPayload()),
                      (RelayMessageTypes.ControlThreadRead, new ThreadReadControlPayload("thr-history")),
+                     (RelayMessageTypes.ControlThreadWatch, new ThreadWatchControlPayload("thr-history", "stream-test", 0)),
+                     (RelayMessageTypes.ControlThreadUnwatch, new ThreadUnwatchControlPayload("thr-history")),
+                     (RelayMessageTypes.ControlThreadSend, new ThreadSendControlPayload("thr-1", "shared steer", "turn-1")),
                      (RelayMessageTypes.ControlThreadStart, new ThreadStartControlPayload(
                          "D:\\Projects\\MES", "new task", "gpt-5.6-terra", "on-request")),
                      (RelayMessageTypes.ControlThreadResume, new ThreadResumeControlPayload(
@@ -319,6 +336,9 @@ internal static class RelayTestRunner
             Assert(
                 routedSessionControl.ControllerId == controller.PrincipalId,
                 $"{remoteSessionControl.Type} should route to the paired device");
+            if (remoteSessionControl.Type == RelayMessageTypes.ControlThreadWatch)
+                Assert(routedSessionControl.ReadPayload<ThreadWatchControlPayload>().AllowJoin,
+                    "full pairing can activate an upstream subscription");
             await device.SendAsync(RelayEnvelope.Create(
                 RelayMessageTypes.ControlResult,
                 new ControlResultPayload(ControlResultStatus.Succeeded, null, null, null),
@@ -334,13 +354,20 @@ internal static class RelayTestRunner
 
         await controller.SendAsync(RelayEnvelope.Create(
             RelayMessageTypes.ControlSteer,
-            new SteerControlPayload("thr-1", "turn-1", "duplicate"),
+            new SteerControlPayload("thr-1", "turn-1", "focus on tests"),
             controlRequestId,
             device.PrincipalId,
             controller.PrincipalId)).ConfigureAwait(false);
         var cachedResult = (await controller.ReceiveAsync(RelayMessageTypes.ControlResult, controlRequestId)
             .ConfigureAwait(false)).ReadPayload<ControlResultPayload>();
         Assert(cachedResult.Status == ControlResultStatus.Succeeded, "duplicate request should return cached result");
+
+        await controller.SendAsync(RelayEnvelope.Create(RelayMessageTypes.ControlSteer,
+            new SteerControlPayload("thr-1", "turn-1", "changed payload"), controlRequestId,
+            device.PrincipalId, controller.PrincipalId));
+        var changedPayload = (await controller.ReceiveAsync(RelayMessageTypes.ControlResult, controlRequestId))
+            .ReadPayload<ControlResultPayload>();
+        Assert(changedPayload.Code == "REQUEST_ID_CONFLICT", "same request ID with different text must fail");
 
         await controller.SendAsync(RelayEnvelope.Create(
             RelayMessageTypes.ControlInterrupt,
@@ -506,6 +533,21 @@ internal static class RelayTestRunner
         var deniedControl = (await controller.ReceiveAsync(RelayMessageTypes.ControlResult, deniedControlId)
             .ConfigureAwait(false)).ReadPayload<ControlResultPayload>();
         Assert(deniedControl.Code == "PERMISSION_DENIED", "ViewOnly controller must not steer");
+
+        var watchId = RelayTestClient.NewRequestId();
+        await controller.SendAsync(RelayEnvelope.Create(RelayMessageTypes.ControlThreadWatch,
+            new ThreadWatchControlPayload("thr-v2", AllowJoin: true), watchId, device.PrincipalId, controller.PrincipalId));
+        var viewWatch = (await device.ReceiveAsync(RelayMessageTypes.ControlThreadWatch, watchId))
+            .ReadPayload<ThreadWatchControlPayload>();
+        Assert(!viewWatch.AllowJoin, "view-only cannot forge subscription activation permission");
+        await device.SendAsync(RelayEnvelope.Create(RelayMessageTypes.ControlResult,
+            new ControlResultPayload(ControlResultStatus.Succeeded, null, null, null), watchId, device.PrincipalId, controller.PrincipalId));
+        _ = await controller.ReceiveAsync(RelayMessageTypes.ControlResult, watchId);
+        var sharedDeniedId = RelayTestClient.NewRequestId();
+        await controller.SendAsync(RelayEnvelope.Create(RelayMessageTypes.ControlThreadSend,
+            new ThreadSendControlPayload("thr-v2", "must be denied"), sharedDeniedId, device.PrincipalId, controller.PrincipalId));
+        Assert((await controller.ReceiveAsync(RelayMessageTypes.ControlResult, sharedDeniedId))
+            .ReadPayload<ControlResultPayload>().Code == "PERMISSION_DENIED", "view-only cannot send shared input");
 
         var updateId = RelayTestClient.NewRequestId();
         await device.SendAsync(RelayEnvelope.Create(

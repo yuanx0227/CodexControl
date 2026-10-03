@@ -289,14 +289,18 @@ internal sealed partial class ControlCenterForm
     {
         var page = CreatePage("高级与诊断", out var stack);
         var runtimeCard = CreateSectionCard(
-            405,
+            785,
             "Codex 与本地端口",
             out var runtimeBody);
         runtimeBody.Controls.Add(_manualCodex);
         runtimeBody.Controls.Add(Field("Codex 路径", _codexPath));
         runtimeBody.Controls.Add(_fixedPort);
         runtimeBody.Controls.Add(Field("固定端口", _port));
-        var save = ActionButton("保存并重启内核", 158, ModernButtonStyle.Primary);
+        runtimeBody.Controls.Add(Field("共享服务地址（实验性）", _sharedEndpoint));
+        runtimeBody.Controls.Add(Field("共享服务身份文件", _sharedManifest));
+        runtimeBody.Controls.Add(Field("允许网页操作的项目目录", _sharedProjects));
+        runtimeBody.Controls.Add(_sharedStandardTemp);
+        var save = ActionButton("保存并重新连接", 158, ModernButtonStyle.Primary);
         save.Click += async (_, _) => await SaveAsync().ConfigureAwait(true);
         runtimeBody.Controls.Add(ActionRow(save));
         AddStackItem(stack, runtimeCard);

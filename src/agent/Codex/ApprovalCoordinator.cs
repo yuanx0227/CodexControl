@@ -16,7 +16,10 @@ public sealed record PendingApprovalSnapshot(
     IReadOnlyList<JsonElement> AvailableDecisions,
     DateTimeOffset RequestedAt,
     bool IsResolved,
-    string? ResolvedBy);
+    string? ResolvedBy)
+{
+    public bool IsResolving { get; init; }
+}
 
 public sealed record ApprovalResolutionResult(
     bool Succeeded,
@@ -31,30 +34,45 @@ public sealed class ApprovalCoordinator
     private const int Pending = 0;
     private const int Resolving = 1;
     private const int Resolved = 2;
+    private const int Invalidated = 3;
 
     private readonly ConcurrentDictionary<string, ApprovalEntry> _byRequestId = new();
     private readonly ConcurrentDictionary<string, ApprovalEntry> _byPublicId = new();
     private readonly Func<string, CancellationToken, ValueTask> _sendResponse;
     private readonly AgentLog _log;
+    private readonly bool _awaitServerResolution;
 
     public ApprovalCoordinator(
         Func<string, CancellationToken, ValueTask> sendResponse,
-        AgentLog log)
+        AgentLog log,
+        bool awaitServerResolution = false)
     {
         _sendResponse = sendResponse;
         _log = log;
+        _awaitServerResolution = awaitServerResolution;
     }
 
     public event Action<PendingApprovalSnapshot>? ApprovalRequested;
 
     public event Action<PendingApprovalSnapshot>? ApprovalResolved;
+    public event Action<PendingApprovalSnapshot>? ApprovalResolving;
 
     public IReadOnlyList<PendingApprovalSnapshot> PendingApprovals =>
         _byPublicId.Values
-            .Where(static entry => Volatile.Read(ref entry.Status) != Resolved)
+            .Where(static entry => Volatile.Read(ref entry.Status) is Pending or Resolving)
             .OrderBy(static entry => entry.RequestedAt)
             .Select(static entry => entry.ToSnapshot())
             .ToArray();
+
+    public void BeginConnection() => ResetConnection();
+
+    /// <summary>Old request IDs cannot be answered on a different transport connection.</summary>
+    public void ResetConnection()
+    {
+        foreach (var entry in _byPublicId.Values) Interlocked.Exchange(ref entry.Status, Invalidated);
+        _byRequestId.Clear();
+        _byPublicId.Clear();
+    }
 
     public void ObserveServerMessage(JsonElement message)
     {
@@ -81,11 +99,11 @@ public sealed class ApprovalCoordinator
             var threadId = FindString(message, "params", "threadId");
             var turnId = FindString(message, "params", "turn", "id") ??
                          FindString(message, "params", "turnId");
+            if (threadId is null || turnId is null) return;
             foreach (var entry in _byPublicId.Values)
             {
-                if (Volatile.Read(ref entry.Status) != Resolved &&
-                    (threadId is null || entry.ThreadId == threadId) &&
-                    (turnId is null || entry.TurnId == turnId))
+                if (Volatile.Read(ref entry.Status) is Pending or Resolving &&
+                    entry.ThreadId == threadId && entry.TurnId == turnId)
                 {
                     Complete(entry, "server-lifecycle");
                 }
@@ -123,7 +141,8 @@ public sealed class ApprovalCoordinator
         try
         {
             await _sendResponse(rawMessage, cancellationToken).ConfigureAwait(false);
-            Complete(entry, "tui");
+            if (!_awaitServerResolution) Complete(entry, "tui");
+            else if (Volatile.Read(ref entry.Status) == Resolving) InvokeSafely(ApprovalResolving, entry.ToSnapshot());
             return true;
         }
         catch
@@ -165,7 +184,10 @@ public sealed class ApprovalCoordinator
             using var resultDocument = JsonDocument.Parse(BuildDecisionResult(decision));
             var response = JsonRpcProtocol.BuildResultResponse(entry.RequestId, resultDocument.RootElement);
             await _sendResponse(response, cancellationToken).ConfigureAwait(false);
-            Complete(entry, responder);
+            // Desktop responds directly to the same server. A successful local write
+            // cannot identify the winning decision across those independent connections.
+            if (!_awaitServerResolution) Complete(entry, responder);
+            else if (Volatile.Read(ref entry.Status) == Resolving) InvokeSafely(ApprovalResolving, entry.ToSnapshot());
             return new ApprovalResolutionResult(true, null, null);
         }
         catch
@@ -220,10 +242,12 @@ public sealed class ApprovalCoordinator
 
     private void Complete(ApprovalEntry entry, string resolvedBy)
     {
-        if (Interlocked.Exchange(ref entry.Status, Resolved) == Resolved)
+        int status;
+        do
         {
-            return;
-        }
+            status = Volatile.Read(ref entry.Status);
+            if (status is Resolved or Invalidated) return;
+        } while (Interlocked.CompareExchange(ref entry.Status, Resolved, status) != status);
 
         entry.ResolvedBy = resolvedBy;
         entry.ResolvedAt = DateTimeOffset.UtcNow;
@@ -459,6 +483,9 @@ public sealed class ApprovalCoordinator
             AvailableDecisions,
             RequestedAt,
             Volatile.Read(ref Status) == Resolved,
-            ResolvedBy);
+            ResolvedBy)
+        {
+            IsResolving = Volatile.Read(ref Status) == Resolving,
+        };
     }
 }

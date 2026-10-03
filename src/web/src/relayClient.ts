@@ -21,6 +21,7 @@ import {
   type CodexThreadActionResult,
   type CodexThreadListResult,
   type CodexThreadReadResult,
+  type CodexThreadWatchResult,
   type ControlResult,
   type DeviceListResult,
   type DeviceSummary,
@@ -29,6 +30,7 @@ import {
   type RelayEnvelope,
 } from './protocol';
 import { loadRelayUrl, type StoredControllerIdentity } from './storage';
+import { ThreadStore, type ThreadView } from './threadStore';
 
 export interface RelayClientState {
   connection: 'connecting' | 'connected' | 'offline';
@@ -37,6 +39,7 @@ export interface RelayClientState {
   devices: DeviceSummary[];
   events: Record<string, CodexEvent[]>;
   approvals: Record<string, ApprovalRequested[]>;
+  threads: Record<string, Record<string, ThreadView>>;
   pairingPending?: string;
   relayVersion?: string;
 }
@@ -71,12 +74,21 @@ export class RelayClient {
   private stopped = false;
   private authRequestId?: string;
   private connectionId?: string;
+  private threadStore = new ThreadStore();
+  private watched = new Map<string, Set<string>>();
+  private watching = new Map<string, Promise<CodexThreadWatchResult>>();
+  private watchBuffers = new Map<string, CodexEvent[]>();
+  private watchBufferSizes = new Map<string, number>();
+  private overflowedWatches = new Set<string>();
+  private streamCursors = new Map<string, { epoch: string; sequence: number }>();
+  private latestSnapshots = new Map<string, CodexSnapshot>();
   private state: RelayClientState = {
     connection: 'offline',
     authenticated: false,
     devices: [],
     events: {},
     approvals: {},
+    threads: {},
   };
 
   subscribe(listener: Listener): () => void {
@@ -221,6 +233,72 @@ export class RelayClient {
     return result.result;
   }
 
+  async watchThread(deviceId: string, threadId: string): Promise<CodexThreadWatchResult> {
+    const snapshot = this.state.devices.find((device) => device.deviceId === deviceId)?.snapshot;
+    if (!snapshot?.sharedSession || !snapshot.capabilities?.includes('sharedSessionV1')) {
+      throw new Error('当前 Agent 未启用共享会话能力，请升级并配置共享模式');
+    }
+    const key = `${deviceId}\0${threadId}`;
+    const pending = this.watching.get(key);
+    if (pending) return pending;
+    const watched = this.watched.get(deviceId) ?? new Set<string>();
+    watched.add(threadId);
+    this.watched.set(deviceId, watched);
+    const view = this.threadStore.view(deviceId, threadId);
+    this.threadStore.beginWatch(deviceId, threadId);
+    this.watchBuffers.set(key, []);
+    this.watchBufferSizes.set(key, 0);
+    this.overflowedWatches.delete(key);
+    this.publishThreads(deviceId);
+    const operation = this.control<CodexThreadWatchResult>(MessageType.controlThreadWatch, deviceId, {
+      threadId, streamEpoch: view?.streamEpoch, afterSequence: view?.sequence,
+    }, 45_000).then((response) => {
+      const result = response.result;
+      if (!result || result.threadId !== threadId || result.history.threadId !== threadId) {
+        throw new Error('Agent 返回了不匹配的共享会话');
+      }
+      if (this.overflowedWatches.has(key)) throw new Error('会话更新积压超过恢复容量，已保留原内容，请重新同步');
+      this.threadStore.applyWatch(deviceId, result, this.watchBuffers.get(key));
+      const cursor = this.streamCursors.get(deviceId);
+      const watermark = Math.max(result.sequence, ...(result.events ?? []).map((event) => event.sequence ?? 0),
+        ...(this.watchBuffers.get(key) ?? []).map((event) => event.sequence ?? 0));
+      this.streamCursors.set(deviceId, { epoch: result.streamEpoch,
+        sequence: Math.max(cursor?.epoch === result.streamEpoch ? cursor.sequence : 0, watermark) });
+      this.publishThreads(deviceId);
+      return result;
+    }).catch((reason: unknown) => {
+      this.threadStore.failWatch(deviceId, threadId, reason instanceof Error ? reason.message : String(reason));
+      this.publishThreads(deviceId);
+      throw reason;
+    }).finally(() => {
+      this.watching.delete(key);
+      this.watchBuffers.delete(key);
+      this.watchBufferSizes.delete(key);
+      this.overflowedWatches.delete(key);
+    });
+    this.watching.set(key, operation);
+    return operation;
+  }
+
+  async unwatchThread(deviceId: string, threadId: string): Promise<void> {
+    await this.control(MessageType.controlThreadUnwatch, deviceId, { threadId });
+    this.watched.get(deviceId)?.delete(threadId);
+  }
+
+  async sendThread(deviceId: string, threadId: string, text: string, expectedTurnId?: string): Promise<CodexThreadActionResult> {
+    try {
+      const result = await this.control<CodexThreadActionResult>(MessageType.controlThreadSend, deviceId,
+        { threadId, text, expectedTurnId }, 45_000);
+      if (!result.result) throw new Error('输入结果待确认，请等待会话同步，不要重复发送');
+      return result.result;
+    } catch (reason) {
+      if (reason instanceof Error && (isTransientReadFailure(reason) || reason.message.includes('OUTCOME_UNKNOWN'))) {
+        throw new Error('输入结果待确认。连接恢复后请先查看会话；此次输入不会自动重发。');
+      }
+      throw reason;
+    }
+  }
+
   async getSessionOptions(deviceId: string): Promise<CodexSessionOptions> {
     const result = await this.readControl<CodexSessionOptions>(
       MessageType.controlSessionOptions,
@@ -274,6 +352,10 @@ export class RelayClient {
       { deviceId, controllerId: identity.controllerId },
     );
     this.identity = await removePairedDevice(identity, deviceId);
+    this.threadStore.clearDevice(deviceId);
+    this.watched.delete(deviceId);
+    this.streamCursors.delete(deviceId);
+    this.latestSnapshots.delete(deviceId);
     this.setState({ devices: this.state.devices.filter((device) => device.deviceId !== deviceId) });
   }
 
@@ -305,10 +387,12 @@ export class RelayClient {
       if (this.heartbeatTimer) window.clearInterval(this.heartbeatTimer);
       this.connectionId = undefined;
       this.failPending(new Error('Relay connection lost'));
+      for (const device of this.state.devices) this.threadStore.markDisconnected(device.deviceId);
       this.setState({
         connection: 'offline',
         authenticated: false,
         devices: this.state.devices.map((device) => ({ ...device, online: false })),
+        threads: Object.fromEntries(this.state.devices.map((device) => [device.deviceId, this.threadStore.device(device.deviceId)])),
       });
       if (!this.stopped) this.scheduleReconnect();
     };
@@ -386,16 +470,20 @@ export class RelayClient {
         break;
       }
       case MessageType.deviceListResult:
-        this.applyDeviceList(envelope.payload as DeviceListResult);
+        if (!envelope.requestId) this.applyDeviceList(envelope.payload as DeviceListResult);
         break;
       case MessageType.deviceOnline:
         this.updateDevice(envelope.deviceId, { online: true });
+        if (envelope.deviceId) this.recoverWatched(envelope.deviceId);
         break;
       case MessageType.deviceOffline:
+        if (envelope.deviceId) this.threadStore.markDisconnected(envelope.deviceId);
         this.updateDevice(envelope.deviceId, { online: false });
         break;
       case MessageType.codexSnapshot:
-        this.updateDevice(envelope.deviceId, { snapshot: envelope.payload as CodexSnapshot });
+        if (envelope.deviceId) {
+          this.applySnapshot(envelope.deviceId, envelope.payload as CodexSnapshot);
+        }
         break;
       case MessageType.codexEvent:
         this.applyEvent(envelope.deviceId, envelope.payload as CodexEvent);
@@ -579,7 +667,18 @@ export class RelayClient {
   }
 
   private applyDeviceList(payload: DeviceListResult): void {
-    this.setState({ devices: payload.devices });
+    const devices = payload.devices.map((device) => {
+      // Snapshot pushes can arrive before the initial device list. The list only
+      // carries metadata, so it must not erase equally recent live fields.
+      const cached = this.latestSnapshots.get(device.deviceId);
+      return cached && (!device.snapshot || cached.streamEpoch === device.snapshot.streamEpoch && cached.revision >= device.snapshot.revision)
+        ? { ...device, snapshot: cached } : device;
+    });
+    this.setState({ devices });
+    for (const device of devices) {
+      if (device.snapshot) this.applySnapshot(device.deviceId, device.snapshot);
+      if (device.online) this.recoverWatched(device.deviceId);
+    }
   }
 
   private updateDevice(deviceId: string | undefined, patch: Partial<DeviceSummary>): void {
@@ -593,50 +692,86 @@ export class RelayClient {
 
   private applyEvent(deviceId: string | undefined, event: CodexEvent): void {
     if (!deviceId) return;
-    const currentEvents = this.state.events[deviceId] ?? [];
-    if (currentEvents.some((candidate) => candidate.eventId === event.eventId)) return;
-    const sameItem = (candidate: CodexEvent) => candidate.itemId === event.itemId &&
-      candidate.threadId === event.threadId && candidate.turnId === event.turnId;
-    let events: CodexEvent[];
-    if (event.kind === 'AgentMessageDelta' && event.itemId) {
-      if (currentEvents.some((candidate) => candidate.kind === 'AgentMessageCompleted' && sameItem(candidate))) return;
-      const delta = typeof event.data.delta === 'string' ? event.data.delta : '';
-      const existing = currentEvents.find((candidate) =>
-        candidate.kind === 'AgentMessageDelta' && sameItem(candidate),
-      );
-      const previousText = existing && typeof existing.data.text === 'string' ? existing.data.text : '';
-      const streamingEvent: CodexEvent = {
-        ...(existing ?? event),
-        revision: event.revision,
-        occurredAt: event.occurredAt,
-        data: { text: `${previousText}${delta}` },
-      };
-      events = [
-        streamingEvent,
-        ...currentEvents.filter((candidate) => candidate !== existing),
-      ].slice(0, 100);
-    } else if ((event.kind === 'AgentMessageCompleted' || event.kind === 'UserMessageCompleted') && event.itemId) {
-      events = [
-        event,
-        ...currentEvents.filter((candidate) =>
-          !(sameItem(candidate) && (candidate.kind === event.kind ||
-            (event.kind === 'AgentMessageCompleted' && candidate.kind === 'AgentMessageDelta'))),
-        ),
-      ].slice(0, 100);
-    } else {
-      events = [event, ...currentEvents].slice(0, 100);
+    const wasRecovering = this.pendingRecovery(deviceId);
+    let streamGap = false;
+    const cursor = this.streamCursors.get(deviceId);
+    if (event.streamEpoch && event.sequence !== undefined) {
+      if (cursor?.epoch === event.streamEpoch && event.sequence <= cursor.sequence) return;
+      if (cursor && (cursor.epoch !== event.streamEpoch || event.sequence > cursor.sequence + 1)) {
+        this.threadStore.markGap(deviceId);
+        streamGap = true;
+      }
+      this.streamCursors.set(deviceId, { epoch: event.streamEpoch, sequence: event.sequence });
     }
-    const approvals = { ...this.state.approvals };
-    if (event.kind === 'ApprovalRequested') {
-      const approval = event.data as unknown as ApprovalRequested;
-      approvals[deviceId] = [approval, ...(approvals[deviceId] ?? [])];
-    } else if (event.kind === 'ApprovalResolved') {
-      const resolved = event.data as { approvalId: string };
-      approvals[deviceId] = (approvals[deviceId] ?? []).filter(
-        (approval) => approval.approvalId !== resolved.approvalId,
-      );
+    if (streamGap) this.recoverWatched(deviceId, this.pendingRecovery(deviceId));
+    let buffered = false;
+    if (event.threadId) {
+      const key = `${deviceId}\0${event.threadId}`;
+      const buffer = this.watchBuffers.get(key);
+      if (buffer) {
+        buffered = true;
+        const size = (this.watchBufferSizes.get(key) ?? 0) + JSON.stringify(event).length * 2;
+        if (!this.overflowedWatches.has(key) && buffer.length < 10_000 && size <= 8 * 1024 * 1024) {
+          buffer.push(event);
+          this.watchBufferSizes.set(key, size);
+        } else {
+          this.overflowedWatches.add(key);
+          this.threadStore.markGap(deviceId);
+        }
+      }
     }
-    this.setState({ events: { ...this.state.events, [deviceId]: events }, approvals });
+    if (event.kind === 'StreamGap' || !event.threadId && event.data.resyncRequired === true) {
+      this.threadStore.markGap(deviceId);
+      streamGap = true;
+    }
+    else if (!buffered) this.threadStore.applyEvent(deviceId, event);
+    this.publishThreads(deviceId);
+    if (event.kind === 'StreamGap' || streamGap) this.recoverWatched(deviceId, this.pendingRecovery(deviceId));
+    else this.recoverNewlyPending(deviceId, wasRecovering);
+  }
+
+  private applySnapshot(deviceId: string, snapshot: CodexSnapshot): void {
+    const old = this.latestSnapshots.get(deviceId);
+    if (old?.streamEpoch === snapshot.streamEpoch && old && old.revision > snapshot.revision) return;
+    this.latestSnapshots.set(deviceId, snapshot);
+    const wasRecovering = this.pendingRecovery(deviceId);
+    this.threadStore.applySnapshot(deviceId, snapshot);
+    const cursor = this.streamCursors.get(deviceId);
+    if (snapshot.streamEpoch && (!cursor || cursor.epoch !== snapshot.streamEpoch)) {
+      this.streamCursors.set(deviceId, { epoch: snapshot.streamEpoch, sequence: snapshot.lastSequence ?? 0 });
+    }
+    this.updateDevice(deviceId, { snapshot });
+    this.publishThreads(deviceId);
+    this.recoverNewlyPending(deviceId, wasRecovering);
+  }
+
+  private pendingRecovery(deviceId: string): Set<string> {
+    return new Set(Object.values(this.threadStore.device(deviceId))
+      .filter((thread) => thread.watching && thread.needsRecovery && !thread.error)
+      .map((thread) => thread.threadId));
+  }
+
+  private recoverNewlyPending(deviceId: string, previous: ReadonlySet<string>): void {
+    const affected = new Set([...this.pendingRecovery(deviceId)].filter((threadId) => !previous.has(threadId)));
+    if (affected.size > 0) this.recoverWatched(deviceId, affected);
+  }
+
+  private recoverWatched(deviceId: string, affected?: ReadonlySet<string>): void {
+    const device = this.state.devices.find((candidate) => candidate.deviceId === deviceId);
+    if (!this.state.authenticated || !device?.online || !device.snapshot?.sharedSession ||
+        !device.snapshot.capabilities?.includes('sharedSessionV1')) return;
+    for (const threadId of this.watched.get(deviceId) ?? []) {
+      if (affected && !affected.has(threadId)) continue;
+      void this.watchThread(deviceId, threadId).catch(() => { /* The thread view exposes recovery failure. */ });
+    }
+  }
+
+  private publishThreads(deviceId: string): void {
+    this.setState({
+      threads: { ...this.state.threads, [deviceId]: this.threadStore.device(deviceId) },
+      events: { ...this.state.events, [deviceId]: this.threadStore.events(deviceId) },
+      approvals: { ...this.state.approvals, [deviceId]: this.threadStore.approvals(deviceId) },
+    });
   }
 
   private setState(patch: Partial<RelayClientState>): void {
@@ -651,6 +786,7 @@ export class RelayClient {
       devices: [...this.state.devices],
       events: { ...this.state.events },
       approvals: { ...this.state.approvals },
+      threads: { ...this.state.threads },
     };
   }
 

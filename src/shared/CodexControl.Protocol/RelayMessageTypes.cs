@@ -43,6 +43,9 @@ public static class RelayMessageTypes
     public const string ControlThreadRead = "control.thread.read";
     public const string ControlThreadStart = "control.thread.start";
     public const string ControlThreadResume = "control.thread.resume";
+    public const string ControlThreadWatch = "control.thread.watch";
+    public const string ControlThreadUnwatch = "control.thread.unwatch";
+    public const string ControlThreadSend = "control.thread.send";
     public const string ControlResult = "control.result";
 
     public const string Heartbeat = "heartbeat";

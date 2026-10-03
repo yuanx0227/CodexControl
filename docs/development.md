@@ -1,5 +1,7 @@
 # Development
 
+官方 Desktop 与网页同时使用同一 Thread 的设置、现场边界和回退步骤见 [共享会话实施与运行](shared-session-implementation.md)。下面的常规真实 Codex 测试默认覆盖独立 stdio 模式；共享实测有单独的显式 manifest 开关。
+
 ## Prerequisites
 
 - Windows 10/11 x64；

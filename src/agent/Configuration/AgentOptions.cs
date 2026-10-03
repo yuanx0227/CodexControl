@@ -21,6 +21,14 @@ public sealed record AgentOptions(
     public const int DefaultPort = 8765;
     public const int DefaultMaxMessageBytes = 8 * 1024 * 1024;
 
+    public Uri? SharedEndpoint { get; init; }
+    public string? SharedManifestPath { get; init; }
+    public IReadOnlyList<string> SharedProjectRoots { get; init; } = [];
+    public bool SharedAllowStandardTemporaryDirectories { get; init; }
+    public bool SharedHost { get; init; }
+    public bool SharedDesktop { get; init; }
+    public string? DesktopPath { get; init; }
+
     public static AgentOptions Parse(IReadOnlyList<string> args)
     {
         var paths = AgentDataPaths.FromApplicationDirectory();
@@ -37,11 +45,39 @@ public sealed record AgentOptions(
         var showHelp = false;
         var dataDirectoryOverridden = false;
         var logDirectoryOverridden = false;
+        string? sharedEndpoint = null;
+        string? sharedManifest = null;
+        string? desktopPath = null;
+        var sharedHost = false;
+        var sharedDesktop = false;
+        var sharedProjectRoots = new List<string>();
+        var sharedAllowStandardTemporaryDirectories = false;
 
         for (var index = 0; index < args.Count; index++)
         {
             switch (args[index])
             {
+                case "--shared-endpoint":
+                    sharedEndpoint = ReadValue(args, ref index, "--shared-endpoint");
+                    break;
+                case "--shared-manifest":
+                    sharedManifest = ReadValue(args, ref index, "--shared-manifest");
+                    break;
+                case "--shared-project-root":
+                    sharedProjectRoots.Add(ReadValue(args, ref index, "--shared-project-root"));
+                    break;
+                case "--shared-allow-standard-temp":
+                    sharedAllowStandardTemporaryDirectories = true;
+                    break;
+                case "--shared-host":
+                    sharedHost = true;
+                    break;
+                case "--shared-desktop":
+                    sharedDesktop = true;
+                    break;
+                case "--desktop-path":
+                    desktopPath = ReadValue(args, ref index, "--desktop-path");
+                    break;
                 case "--codex-path":
                     codexPath = ReadValue(args, ref index, "--codex-path");
                     break;
@@ -132,6 +168,17 @@ public sealed record AgentOptions(
             logDirectory = Path.Combine(dataDirectory, "logs");
         }
 
+        if ((sharedEndpoint is null) != (sharedManifest is null) ||
+            (sharedHost || sharedDesktop) && sharedEndpoint is null || sharedHost && sharedDesktop)
+        {
+            throw new AgentConfigurationException("共享模式必须同时指定 --shared-endpoint 和 --shared-manifest；host 与 desktop 模式不能同时使用。");
+        }
+        var validatedEndpoint = sharedEndpoint is null ? null : ParseSharedEndpoint(sharedEndpoint);
+        if (sharedDesktop && (string.IsNullOrWhiteSpace(desktopPath) || !Path.IsPathFullyQualified(desktopPath)))
+        {
+            throw new AgentConfigurationException("--shared-desktop 必须指定官方 Desktop 的绝对 --desktop-path。");
+        }
+
         return new AgentOptions(
             codexPath.Trim(),
             port,
@@ -143,7 +190,16 @@ public sealed record AgentOptions(
             createPairing,
             allowInsecureRelay,
             probeOnly,
-            showHelp);
+            showHelp)
+        {
+            SharedEndpoint = validatedEndpoint,
+            SharedManifestPath = sharedManifest is null ? null : Path.GetFullPath(sharedManifest),
+            SharedProjectRoots = SharedProjectAuthorization.Validate(sharedProjectRoots),
+            SharedAllowStandardTemporaryDirectories = sharedAllowStandardTemporaryDirectories,
+            SharedHost = sharedHost,
+            SharedDesktop = sharedDesktop,
+            DesktopPath = desktopPath,
+        };
     }
 
     public static AgentOptions FromSettings(AgentSettings settings, AgentDataPaths paths)
@@ -169,7 +225,13 @@ public sealed record AgentOptions(
             CreatePairing: false,
             AllowInsecureRelay: relayUrl?.Scheme == Uri.UriSchemeHttp,
             ProbeOnly: false,
-            ShowHelp: false);
+            ShowHelp: false)
+        {
+            SharedEndpoint = validated.SharedEndpoint is null ? null : ParseSharedEndpoint(validated.SharedEndpoint),
+            SharedManifestPath = validated.SharedManifestPath,
+            SharedProjectRoots = validated.SharedProjectRoots,
+            SharedAllowStandardTemporaryDirectories = validated.SharedAllowStandardTemporaryDirectories,
+        };
     }
 
     public static AgentOptions ForTests(string codexPath, string logDirectory, int port = 0) =>
@@ -206,11 +268,30 @@ public sealed record AgentOptions(
           --allow-insecure-relay     仅本地开发允许 ws/http Relay
           --headless                 使用命令行模式；参数只影响当前进程
           --background               GUI 模式静默进入托盘
+          --shared-endpoint <ws-url>  连接已知共享服务，只接受 ws://127.0.0.1:<port>
+          --shared-manifest <path>    本机服务身份文件；连接时核对 PID、创建时间、镜像、版本和监听
+          --shared-project-root <dir> 本机明确授权的共享项目目录，可重复；不设置时禁止新增远程工作
+          --shared-allow-standard-temp 额外授权 Desktop 标准临时目录策略；需已核实服务环境，无自定义 TMPDIR
+          --shared-host              独立运行共享服务宿主；不允许从 Desktop 进程树/Job 启动
+          --shared-desktop           以进程级 WS 环境打开官方 Desktop；必须先正常退出所有 Desktop
+          --desktop-path <path>      官方 WindowsApps 包内 ChatGPT.exe 的绝对路径
           --probe-only               只验证 Codex CLI/app-server 能力，不启动 Agent
           -h, --help                 显示帮助
 
         Agent 只监听 127.0.0.1，不读取或上传 OpenAI API Key。
         """;
+
+    public static Uri ParseSharedEndpoint(string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != "ws" ||
+            uri.Host != "127.0.0.1" || uri.Port is < 1 or > 65535 ||
+            uri.AbsolutePath is not ("" or "/") || uri.UserInfo.Length != 0 ||
+            uri.Query.Length != 0 || uri.Fragment.Length != 0)
+        {
+            throw new AgentConfigurationException("共享服务地址只允许无凭据、查询和路径的 ws://127.0.0.1:<port>。");
+        }
+        return uri;
+    }
 
     private static string ReadValue(IReadOnlyList<string> args, ref int index, string option)
     {

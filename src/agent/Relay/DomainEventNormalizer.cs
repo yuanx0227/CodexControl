@@ -8,6 +8,8 @@ namespace CodexControl.Agent.Relay;
 
 internal static class DomainEventNormalizer
 {
+    // Fits below the Relay frame limit even when JSON escapes every UTF-16 code unit.
+    private const int MaximumTextLength = 128_000;
     public static CodexEventPayload? Normalize(JsonElement message, CodexStateSnapshot snapshot)
     {
         if (!JsonRpcProtocol.TryGetMethod(message, out var method))
@@ -22,12 +24,19 @@ internal static class DomainEventNormalizer
             "turn/started" => "TurnStarted",
             "turn/completed" => "TurnCompleted",
             "item/agentMessage/delta" => "AgentMessageDelta",
+            "item/commandExecution/outputDelta" => "CommandOutputDelta",
+            "turn/plan/updated" => "PlanUpdated",
+            "item/reasoning/summaryTextDelta" => "ReasoningSummaryDelta",
+            "thread/settings/updated" => "ThreadSettingsChanged",
             "item/started" when ItemType(message) == "commandExecution" => "CommandStarted",
             "item/completed" when ItemType(message) == "commandExecution" => "CommandCompleted",
             "item/completed" when ItemType(message) == "agentMessage" => "AgentMessageCompleted",
             "item/started" or "item/completed" when ItemType(message) == "userMessage" => "UserMessageCompleted",
             "item/completed" when ItemType(message) == "fileChange" => "FileChanged",
+            "item/started" when ItemType(message) is "agentMessage" or "fileChange" or "reasoning" => null,
+            "item/completed" when ItemType(message) == "reasoning" => null,
             "error" => "ErrorOccurred",
+            "item/started" or "item/completed" => "UnsupportedItem",
             _ => null,
         };
         if (kind is null)
@@ -51,20 +60,11 @@ internal static class DomainEventNormalizer
             {
                 startedAt = FindInt64(message, "params", "turn", "startedAt"),
             }, RelayJson.Options),
-            "AgentMessageDelta" => JsonSerializer.SerializeToElement(new
-            {
-                delta = Truncate(FindString(message, "params", "delta"), 4000),
-            }, RelayJson.Options),
-            "CommandStarted" or "CommandCompleted" => JsonSerializer.SerializeToElement(new
-            {
-                command = Truncate(FindString(message, "params", "item", "command"), 1000),
-                cwd = FindString(message, "params", "item", "cwd"),
-                status = FindString(message, "params", "item", "status"),
-            }, RelayJson.Options),
-            "AgentMessageCompleted" => JsonSerializer.SerializeToElement(new
-            {
-                text = Truncate(FindString(message, "params", "item", "text"), 20_000),
-            }, RelayJson.Options),
+            "AgentMessageDelta" or "CommandOutputDelta" or "ReasoningSummaryDelta" =>
+                MapText("delta", FindString(message, "params", "delta")),
+            "CommandStarted" or "CommandCompleted" => MapCommand(message),
+            "AgentMessageCompleted" => MapText("text", FindString(message, "params", "item", "text")),
+            "PlanUpdated" => MapPlan(message),
             "TurnCompleted" => JsonSerializer.SerializeToElement(new
             {
                 status = FindString(message, "params", "turn", "status"),
@@ -73,17 +73,28 @@ internal static class DomainEventNormalizer
                 durationMs = FindInt64(message, "params", "turn", "durationMs"),
             }, RelayJson.Options),
             "FileChanged" => MapFileChangedData(message),
+            "UnsupportedItem" => JsonSerializer.SerializeToElement(new
+            {
+                itemType = Truncate(ItemType(message), 128), supported = false,
+            }, RelayJson.Options),
             _ => JsonSerializer.SerializeToElement(new { }, RelayJson.Options),
         };
 
         var threadId = FindString(message, "params", "threadId") ??
                        FindString(message, "params", "thread", "id") ??
-                       snapshot.ActiveThreadId;
+                       FindString(message, "params", "turn", "threadId") ??
+                       FindString(message, "params", "item", "threadId");
         var turnId = FindString(message, "params", "turn", "id") ??
                      FindString(message, "params", "turnId") ??
-                     FindString(message, "params", "item", "turnId") ??
-                     snapshot.ActiveTurns.FirstOrDefault(value => value.ThreadId == threadId)?.TurnId ??
-                     (threadId == snapshot.ActiveThreadId ? snapshot.ActiveTurnId : null);
+                     FindString(message, "params", "item", "turnId");
+        if (threadId is null && turnId is not null)
+            threadId = snapshot.ActiveTurns.FirstOrDefault(value => value.TurnId == turnId)?.ThreadId;
+        if (threadId is null || kind is not ("AgentStarted" or "ThreadStatusChanged" or "ThreadSettingsChanged") && turnId is null)
+        {
+            // Surface a metadata-only recovery signal. Never attach content to UI focus.
+            kind = "UnattributedEvent";
+            data = JsonSerializer.SerializeToElement(new { method, resyncRequired = true }, RelayJson.Options);
+        }
 
         return new CodexEventPayload(
             string.Concat("evt_", Guid.NewGuid().ToString("N")),
@@ -104,8 +115,56 @@ internal static class DomainEventNormalizer
             ? CodexThreadHistoryMapper.MapUserContent(item) : null;
         return JsonSerializer.SerializeToElement(new
         {
-            text = Truncate(content?.Text, 20_000),
+            text = Truncate(content?.Text, MaximumTextLength),
             attachments = content?.Attachments,
+            truncated = content?.Text.Length > MaximumTextLength,
+            originalLength = content?.Text.Length ?? 0,
+            resyncRequired = content?.Text.Length > MaximumTextLength,
+        }, RelayJson.Options);
+    }
+
+    private static JsonElement MapText(string field, string? text) => JsonSerializer.SerializeToElement(
+        new Dictionary<string, object?>
+        {
+            [field] = Truncate(text, MaximumTextLength),
+            ["truncated"] = text?.Length > MaximumTextLength,
+            ["originalLength"] = text?.Length ?? 0,
+            ["resyncRequired"] = text?.Length > MaximumTextLength,
+        }, RelayJson.Options);
+
+    private static JsonElement MapCommand(JsonElement message)
+    {
+        var command = FindString(message, "params", "item", "command");
+        var output = FindString(message, "params", "item", "aggregatedOutput");
+        return JsonSerializer.SerializeToElement(new
+        {
+            command = Truncate(command, MaximumTextLength / 2),
+            output = Truncate(output, MaximumTextLength / 2),
+            commandOriginalLength = command?.Length ?? 0,
+            outputOriginalLength = output?.Length ?? 0,
+            truncated = command?.Length > MaximumTextLength / 2 || output?.Length > MaximumTextLength / 2,
+            cwd = FindString(message, "params", "item", "cwd"),
+            status = FindString(message, "params", "item", "status"),
+            exitCode = FindInt64(message, "params", "item", "exitCode"),
+        }, RelayJson.Options);
+    }
+
+    private static JsonElement MapPlan(JsonElement message)
+    {
+        var plan = TryFind(message, out var values, "params", "plan") && values.ValueKind == JsonValueKind.Array
+            ? values.EnumerateArray().Take(100).Select(value => new
+            {
+                step = Truncate(FindString(value, "step"), 1000),
+                status = FindString(value, "status"),
+            }).ToArray() : [];
+        var explanation = FindString(message, "params", "explanation");
+        return JsonSerializer.SerializeToElement(new
+        {
+            plan,
+            explanation = Truncate(explanation, 4000),
+            truncated = explanation?.Length > 4000 ||
+                (values.ValueKind == JsonValueKind.Array && (values.GetArrayLength() > 100 ||
+                    values.EnumerateArray().Any(value => FindString(value, "step")?.Length > 1000))),
         }, RelayJson.Options);
     }
 
@@ -152,11 +211,17 @@ internal static class DomainEventNormalizer
     private static JsonElement MapFileChangedData(JsonElement message)
     {
         var changes = FindChangedFiles(message);
+        var sourceCount = TryFind(message, out var source, "params", "item", "changes") && source.ValueKind == JsonValueKind.Array
+            ? source.GetArrayLength() : 0;
         return JsonSerializer.SerializeToElement(new
         {
             changes,
             paths = changes.Select(change => change.Path).ToArray(),
             status = FindString(message, "params", "item", "status"),
+            diffIncluded = false,
+            originalChangeCount = sourceCount,
+            truncated = sourceCount > changes.Count || (source.ValueKind == JsonValueKind.Array &&
+                source.EnumerateArray().Any(value => FindString(value, "diff")?.Length > 200_000 || FindString(value, "path")?.Length > 2_048)),
         }, RelayJson.Options);
     }
 
@@ -175,6 +240,10 @@ internal static class DomainEventNormalizer
         return true;
     }
 
-    private static string? Truncate(string? value, int maxLength) =>
-        value is null || value.Length <= maxLength ? value : string.Concat(value.AsSpan(0, maxLength), "...");
+    private static string? Truncate(string? value, int maxLength)
+    {
+        if (value is null || value.Length <= maxLength) return value;
+        var length = char.IsHighSurrogate(value[maxLength - 1]) ? maxLength - 1 : maxLength;
+        return value[..length];
+    }
 }

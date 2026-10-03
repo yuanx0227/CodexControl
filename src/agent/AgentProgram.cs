@@ -8,6 +8,7 @@ using CodexControl.Agent.Proxy;
 using CodexControl.Agent.Relay;
 using CodexControl.Agent.Security;
 using CodexControl.Agent.State;
+using CodexControl.Agent.Lifecycle;
 
 namespace CodexControl.Agent;
 
@@ -50,39 +51,66 @@ public static class AgentProgram
             return 0;
         }
 
+        if (options.SharedHost)
+        {
+            try { return SharedRuntimeHost.Run(options); }
+            catch (Exception exception)
+            {
+                MessageBox.Show(exception is AgentConfigurationException ? exception.Message : "共享宿主启动失败。", "Codex Control");
+                return 3;
+            }
+        }
+
         try
         {
             using var log = new AgentLog(options.LogDirectory);
             log.Info("startup", ".NET 8 CodexControlAgent starting");
 
-            var runtime = await CodexRuntimeResolver.ResolveAsync(
-                options.CodexPath,
-                options.DataDirectory,
-                CancellationToken.None).ConfigureAwait(false);
-            options = options with { CodexPath = runtime.ExecutablePath };
-            log.Info(
-                "codex_runtime_resolved",
-                $"Codex runtime source={runtime.Source}; staged={runtime.WasStaged}; " +
-                $"package={runtime.DesktopPackageName ?? "none"}");
-            if (runtime.Source == CodexRuntimeSource.DesktopBundle)
-            {
-                Console.WriteLine(
-                    $"CODEX_RUNTIME DESKTOP {runtime.DesktopPackageName} " +
-                    $"{(runtime.WasStaged ? "STAGED" : "REUSED")}");
-            }
+            if (options.SharedDesktop)
+                return await SharedRuntimeHost.LaunchDesktopAsync(options, CancellationToken.None).ConfigureAwait(false);
 
-            var probe = await CodexExecutableProbe.ProbeAsync(
-                options.CodexPath,
-                CancellationToken.None).ConfigureAwait(false);
-            log.Info("codex_probe_succeeded", $"Codex capability probe succeeded; version={probe.Version}");
-
-            if (options.ProbeOnly)
+            if (options.SharedEndpoint is not null)
             {
-                Console.WriteLine(JsonSerializer.Serialize(probe, new JsonSerializerOptions
+                var sharedIdentity = await SharedServiceIdentity.ReadAndVerifyAsync(options.SharedManifestPath!, options.SharedEndpoint, CancellationToken.None).ConfigureAwait(false);
+                options = options with { CodexPath = sharedIdentity.ImagePath };
+                if (options.ProbeOnly)
                 {
-                    WriteIndented = true,
-                }));
-                return 0;
+                    Console.WriteLine(JsonSerializer.Serialize(sharedIdentity));
+                    return 0;
+                }
+            }
+            else
+            {
+
+                var runtime = await CodexRuntimeResolver.ResolveAsync(
+                    options.CodexPath,
+                    options.DataDirectory,
+                    CancellationToken.None).ConfigureAwait(false);
+                options = options with { CodexPath = runtime.ExecutablePath };
+                log.Info(
+                    "codex_runtime_resolved",
+                    $"Codex runtime source={runtime.Source}; staged={runtime.WasStaged}; " +
+                    $"package={runtime.DesktopPackageName ?? "none"}");
+                if (runtime.Source == CodexRuntimeSource.DesktopBundle)
+                {
+                    Console.WriteLine(
+                        $"CODEX_RUNTIME DESKTOP {runtime.DesktopPackageName} " +
+                        $"{(runtime.WasStaged ? "STAGED" : "REUSED")}");
+                }
+
+                var probe = await CodexExecutableProbe.ProbeAsync(
+                    options.CodexPath,
+                    CancellationToken.None).ConfigureAwait(false);
+                log.Info("codex_probe_succeeded", $"Codex capability probe succeeded; version={probe.Version}");
+
+                if (options.ProbeOnly)
+                {
+                    Console.WriteLine(JsonSerializer.Serialize(probe, new JsonSerializerOptions
+                    {
+                        WriteIndented = true,
+                    }));
+                    return 0;
+                }
             }
 
             using var shutdown = new CancellationTokenSource();
@@ -98,6 +126,7 @@ public static class AgentProgram
                 : DeviceIdentity.LoadOrCreate(options.DataDirectory, options.DeviceName);
             var restartAttempt = 0;
             var pairingCreated = false;
+            var sharedRuntime = new SharedSessionRuntimeContext();
             try
             {
                 while (!shutdown.IsCancellationRequested)
@@ -110,12 +139,12 @@ public static class AgentProgram
                     try
                     {
                         await bridge.StartAsync(shutdown.Token).ConfigureAwait(false);
-                        await proxy.StartAsync(shutdown.Token).ConfigureAwait(false);
+                        if (!bridge.IsSharedSession) await proxy.StartAsync(shutdown.Token).ConfigureAwait(false);
 
                         if (options.RelayUrl is not null && identity is not null)
                         {
-                            var dispatcher = new RemoteControlDispatcher(bridge, state);
-                            relayClient = new RelayClient(options, identity, state, bridge, dispatcher, log);
+                            var dispatcher = new RemoteControlDispatcher(bridge, state, sharedRuntime);
+                            relayClient = new RelayClient(options, identity, state, bridge, dispatcher, log, runtimeContext: sharedRuntime);
                             relayClient.Start();
                             Console.WriteLine($"DEVICE {identity.DeviceId} {identity.Name}");
                             Console.WriteLine($"RELAY {options.RelayUrl}");
@@ -128,10 +157,14 @@ public static class AgentProgram
                             }
                         }
 
-                        Console.WriteLine($"READY {proxy.WebSocketUri}");
-                        Console.WriteLine(
-                            $"CONNECT & {ToPowerShellLiteral(options.CodexPath)} --remote " +
-                            ToPowerShellLiteral(proxy.WebSocketUri.ToString()));
+                        if (bridge.IsSharedSession)
+                            Console.WriteLine($"READY SHARED {bridge.ServiceInstanceId}");
+                        else
+                        {
+                            Console.WriteLine($"READY {proxy.WebSocketUri}");
+                            Console.WriteLine($"CONNECT & {ToPowerShellLiteral(options.CodexPath)} --remote " +
+                                ToPowerShellLiteral(proxy.WebSocketUri.ToString()));
+                        }
 
                         var cancellationTask = Task.Delay(Timeout.InfiniteTimeSpan, shutdown.Token);
                         var completed = await Task.WhenAny(cancellationTask, bridge.Completion).ConfigureAwait(false);

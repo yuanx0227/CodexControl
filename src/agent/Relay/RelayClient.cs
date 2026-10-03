@@ -34,6 +34,12 @@ public sealed class RelayClient : IAsyncDisposable
     private readonly ConcurrentDictionary<string, TaskCompletionSource<RelayEnvelope>> _pending = new();
     private readonly HashSet<string> _pairedControllers = new(StringComparer.Ordinal);
     private readonly object _connectionGate = new();
+    private readonly object _eventPublishGate = new();
+    private readonly SessionEventJournal _journal = new();
+    private readonly ControlSubmissionLedger _submissions;
+    private readonly ConcurrentDictionary<string, string> _watches = new(StringComparer.Ordinal);
+    private int _recoveringWatches;
+    private int _streamGap;
 
     private Channel<RelayEnvelope>? _activeOutbound;
     private Task? _runTask;
@@ -49,9 +55,11 @@ public sealed class RelayClient : IAsyncDisposable
         RemoteControlDispatcher dispatcher,
         AgentLog log,
         IReadOnlyList<PendingPairingRevocation>? preReadyRevocations = null,
-        Action<long>? revocationSynchronized = null)
+        Action<long>? revocationSynchronized = null,
+        SharedSessionRuntimeContext? runtimeContext = null)
     {
         _options = options;
+        _submissions = runtimeContext?.GetSubmissionLedger(options.DataDirectory) ?? new ControlSubmissionLedger(options.DataDirectory);
         _identity = identity;
         _state = state;
         _bridge = bridge;
@@ -64,6 +72,7 @@ public sealed class RelayClient : IAsyncDisposable
         _bridge.ServerMessageReceived += OnServerMessage;
         _bridge.Approvals.ApprovalRequested += OnApprovalRequested;
         _bridge.Approvals.ApprovalResolved += OnApprovalResolved;
+        _bridge.Approvals.ApprovalResolving += OnApprovalResolving;
     }
 
     public void Start()
@@ -145,6 +154,7 @@ public sealed class RelayClient : IAsyncDisposable
         _bridge.ServerMessageReceived -= OnServerMessage;
         _bridge.Approvals.ApprovalRequested -= OnApprovalRequested;
         _bridge.Approvals.ApprovalResolved -= OnApprovalResolved;
+        _bridge.Approvals.ApprovalResolving -= OnApprovalResolving;
         _lifetime.Cancel();
         Channel<RelayEnvelope>? outbound;
         lock (_connectionGate)
@@ -255,8 +265,10 @@ public sealed class RelayClient : IAsyncDisposable
             deviceId: _identity.DeviceId));
 
         using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        await using var controls = new BoundedControlDispatcher(HandleControlAsync, OnControlDispatchFailure,
+            connectionCancellation.Token);
         var writerTask = WriterLoopAsync(socket, outbound.Reader, connectionCancellation.Token);
-        var readerTask = ReaderLoopAsync(socket, connectionCancellation.Token);
+        var readerTask = ReaderLoopAsync(socket, controls, connectionCancellation.Token);
         var heartbeatTask = HeartbeatLoopAsync(outbound.Writer, auth.ConnectionId, connectionCancellation.Token);
         await Task.WhenAny(writerTask, readerTask, heartbeatTask).ConfigureAwait(false);
         connectionCancellation.Cancel();
@@ -342,7 +354,7 @@ public sealed class RelayClient : IAsyncDisposable
         }
     }
 
-    private async Task ReaderLoopAsync(ClientWebSocket socket, CancellationToken cancellationToken)
+    private async Task ReaderLoopAsync(ClientWebSocket socket, BoundedControlDispatcher controls, CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -363,7 +375,14 @@ public sealed class RelayClient : IAsyncDisposable
                 case RelayMessageTypes.ControlThreadRead:
                 case RelayMessageTypes.ControlThreadStart:
                 case RelayMessageTypes.ControlThreadResume:
-                    await HandleControlAsync(envelope, cancellationToken).ConfigureAwait(false);
+                case RelayMessageTypes.ControlThreadWatch:
+                case RelayMessageTypes.ControlThreadUnwatch:
+                case RelayMessageTypes.ControlThreadSend:
+                    if (!controls.TryDispatch(envelope))
+                        TryEnqueue(RelayEnvelope.Create(RelayMessageTypes.ControlResult,
+                            new ControlResultPayload(ControlResultStatus.Failed, "CONTROL_BUSY",
+                                "当前控制请求较多，此请求未执行。", null), envelope.RequestId,
+                            _identity.DeviceId, envelope.ControllerId));
                     break;
                 case RelayMessageTypes.PairingCompleted:
                     {
@@ -417,6 +436,15 @@ public sealed class RelayClient : IAsyncDisposable
         }
     }
 
+    private void OnControlDispatchFailure(RelayEnvelope envelope, Exception exception)
+    {
+        _log.Warning("control_dispatch_failed", $"Control worker failed: {exception.GetType().Name}");
+        TryEnqueue(RelayEnvelope.Create(RelayMessageTypes.ControlResult,
+            new ControlResultPayload(ControlResultStatus.Failed, "CONTROL_OUTCOME_UNKNOWN",
+                "控制请求未得到确定结果，请同步后核实；没有自动重发。", null),
+            envelope.RequestId, _identity.DeviceId, envelope.ControllerId));
+    }
+
     private async Task HeartbeatLoopAsync(
         ChannelWriter<RelayEnvelope> writer,
         string connectionId,
@@ -425,6 +453,10 @@ public sealed class RelayClient : IAsyncDisposable
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
         while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
         {
+            if (_bridge.IsSharedSession && Interlocked.Exchange(ref _streamGap, 0) != 0)
+            {
+                PublishEvent(ToEvent("StreamGap", null, null, null, new { resyncRequired = true }));
+            }
             await writer.WriteAsync(RelayEnvelope.Create(
                 RelayMessageTypes.Heartbeat,
                 new HeartbeatPayload(connectionId, Volatile.Read(ref _latestSnapshot).Revision),
@@ -440,10 +472,30 @@ public sealed class RelayClient : IAsyncDisposable
         }
 
         ControlDispatchResult result;
+        var trackSubmission = _bridge.IsSharedSession && ControlSubmissionLedger.IsMutation(envelope.Type);
+        if (trackSubmission && _submissions.Begin(envelope) is { } previous)
+        {
+            TryEnqueue(RelayEnvelope.Create(RelayMessageTypes.ControlResult, previous, envelope.RequestId,
+                _identity.DeviceId, envelope.ControllerId));
+            return;
+        }
         try
         {
             switch (envelope.Type)
             {
+                case RelayMessageTypes.ControlThreadWatch:
+                    result = await WatchThreadAsync(envelope.ReadPayload<ThreadWatchControlPayload>(), envelope.ControllerId,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case RelayMessageTypes.ControlThreadUnwatch:
+                    _watches.TryRemove(envelope.ControllerId + ":" + envelope.ReadPayload<ThreadUnwatchControlPayload>().ThreadId, out _);
+                    result = new(true, null, null, null);
+                    break;
+                case RelayMessageTypes.ControlThreadSend:
+                    var send = envelope.ReadPayload<ThreadSendControlPayload>();
+                    result = await _dispatcher.SharedSessions.SendAsync(send.ThreadId, send.Text, send.ExpectedTurnId, cancellationToken)
+                        .ConfigureAwait(false);
+                    break;
                 case RelayMessageTypes.ControlSteer:
                     {
                         var payload = envelope.ReadPayload<SteerControlPayload>();
@@ -523,6 +575,10 @@ public sealed class RelayClient : IAsyncDisposable
                     return;
             }
         }
+        catch (AgentException exception)
+        {
+            result = new(false, exception.Code, "共享会话操作不可用；未修改权限或自动重发。", null);
+        }
         catch (Exception exception) when (exception is JsonException or InvalidOperationException)
         {
             result = new ControlDispatchResult(
@@ -541,9 +597,7 @@ public sealed class RelayClient : IAsyncDisposable
                 null);
         }
 
-        TryEnqueue(RelayEnvelope.Create(
-            RelayMessageTypes.ControlResult,
-            new ControlResultPayload(
+        var controlResult = new ControlResultPayload(
                 result.Succeeded
                     ? envelope.Type == RelayMessageTypes.ControlInterrupt
                         ? ControlResultStatus.Accepted
@@ -551,7 +605,11 @@ public sealed class RelayClient : IAsyncDisposable
                     : ControlResultStatus.Failed,
                 result.ErrorCode,
                 result.ErrorMessage,
-                result.Result),
+                result.Result);
+        if (trackSubmission) _submissions.Complete(envelope, controlResult);
+        TryEnqueue(RelayEnvelope.Create(
+            RelayMessageTypes.ControlResult,
+            controlResult,
             envelope.RequestId,
             _identity.DeviceId,
             envelope.ControllerId));
@@ -590,11 +648,15 @@ public sealed class RelayClient : IAsyncDisposable
 
     private void OnSnapshotChanged(CodexStateSnapshot snapshot)
     {
+        _journal.SetConnection(_bridge.ConnectionEpoch);
         Volatile.Write(ref _latestSnapshot, MapSnapshot(snapshot));
         TryEnqueue(RelayEnvelope.Create(
             RelayMessageTypes.CodexSnapshot,
             Volatile.Read(ref _latestSnapshot),
             deviceId: _identity.DeviceId));
+        if (_bridge.IsSharedSession && snapshot.ConnectionState == "online" &&
+            _watches.Values.Any(epoch => epoch != _bridge.ConnectionEpoch) && Interlocked.Exchange(ref _recoveringWatches, 1) == 0)
+            _ = RecoverWatchesAsync();
     }
 
     private void OnServerMessage(JsonElement message)
@@ -602,10 +664,7 @@ public sealed class RelayClient : IAsyncDisposable
         var domainEvent = DomainEventNormalizer.Normalize(message, _state.Snapshot);
         if (domainEvent is not null)
         {
-            TryEnqueue(RelayEnvelope.Create(
-                RelayMessageTypes.CodexEvent,
-                domainEvent,
-                deviceId: _identity.DeviceId));
+            PublishEvent(domainEvent);
         }
     }
 
@@ -621,12 +680,13 @@ public sealed class RelayClient : IAsyncDisposable
             approval.Cwd,
             approval.Reason,
             approval.AvailableDecisions,
-            approval.RequestedAt.ToUnixTimeMilliseconds());
-        TryEnqueue(RelayEnvelope.Create(
-            RelayMessageTypes.CodexEvent,
-            ToEvent("ApprovalRequested", approval.ThreadId, approval.TurnId, approval.ItemId, payload),
-            deviceId: _identity.DeviceId));
+            approval.RequestedAt.ToUnixTimeMilliseconds(), approval.IsResolving);
+        PublishEvent(ToEvent("ApprovalRequested", approval.ThreadId, approval.TurnId, approval.ItemId, payload));
     }
+
+    private void OnApprovalResolving(PendingApprovalSnapshot approval) =>
+        PublishEvent(ToEvent("ApprovalResolving", approval.ThreadId, approval.TurnId, approval.ItemId,
+            new { approvalId = approval.ApprovalId, isResolving = true }));
 
     private void OnApprovalResolved(PendingApprovalSnapshot approval)
     {
@@ -634,10 +694,126 @@ public sealed class RelayClient : IAsyncDisposable
             approval.ApprovalId,
             approval.ResolvedBy,
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        TryEnqueue(RelayEnvelope.Create(
-            RelayMessageTypes.CodexEvent,
-            ToEvent("ApprovalResolved", approval.ThreadId, approval.TurnId, approval.ItemId, payload),
-            deviceId: _identity.DeviceId));
+        PublishEvent(ToEvent("ApprovalResolved", approval.ThreadId, approval.TurnId, approval.ItemId, payload));
+    }
+
+    private void PublishEvent(CodexEventPayload value)
+    {
+        // Numbering and enqueueing are one operation across protocol, approval and
+        // heartbeat callbacks. TryEnqueue never waits for a network write.
+        lock (_eventPublishGate)
+        {
+            _journal.SetConnection(_bridge.ConnectionEpoch);
+            // Budget the actual wire envelope, including UTF-8/JSON escaping and
+            // attachments. The maximum sequence width also covers the later Append.
+            if (_bridge.IsSharedSession)
+                value = value with { ServiceInstanceId = _bridge.ServiceInstanceId,
+                    StreamEpoch = _journal.Cursor.Epoch, Sequence = long.MaxValue };
+            value = ConstrainDomainEvent(value, _identity.DeviceId);
+            if (_bridge.IsSharedSession) value = _journal.Append(value, _bridge.ServiceInstanceId);
+            if (!TryEnqueue(RelayEnvelope.Create(RelayMessageTypes.CodexEvent, value, deviceId: _identity.DeviceId)))
+                Interlocked.Exchange(ref _streamGap, 1);
+        }
+    }
+
+    internal static CodexEventPayload ConstrainDomainEvent(CodexEventPayload value, string deviceId)
+    {
+        const int maximumEnvelopeBytes = 900 * 1024;
+        int Size(CodexEventPayload candidate) => JsonSerializer.SerializeToUtf8Bytes(
+            RelayEnvelope.Create(RelayMessageTypes.CodexEvent, candidate, deviceId: deviceId), RelayJson.Options).Length;
+        if (Size(value) <= maximumEnvelopeBytes) return value;
+        var incomplete = value with
+        {
+            Kind = "ContentIncomplete",
+            Data = JsonSerializer.SerializeToElement(new
+            {
+                truncated = true, resyncRequired = true, reason = "EVENT_TOO_LARGE", originalKind = value.Kind,
+            }, RelayJson.Options),
+        };
+        if (Size(incomplete) <= maximumEnvelopeBytes) return incomplete;
+        // Malformed oversized identity fields cannot be safely attributed. Emit only
+        // a small recovery signal instead of copying them or guessing UI focus.
+        return new CodexEventPayload("evt_" + Guid.NewGuid().ToString("N"), value.Revision, "StreamGap",
+            null, null, null, value.OccurredAt,
+            JsonSerializer.SerializeToElement(new { resyncRequired = true, reason = "EVENT_IDENTITY_TOO_LARGE" }, RelayJson.Options),
+            value.ServiceInstanceId, value.StreamEpoch, value.Sequence);
+    }
+
+    private async Task<ControlDispatchResult> WatchThreadAsync(ThreadWatchControlPayload payload, string controller, CancellationToken token)
+    {
+        if (payload.AfterSequence is < 0) return new(false, "INVALID_CURSOR", "Invalid stream cursor.", null);
+        _journal.SetConnection(_bridge.ConnectionEpoch);
+        var cursor = _journal.Cursor;
+        var (_, reason) = await _dispatcher.SharedSessions.JoinAsync(payload.ThreadId, token, payload.AllowJoin).ConfigureAwait(false);
+        _watches[controller + ":" + payload.ThreadId] = _bridge.ConnectionEpoch;
+        var replay = _journal.Read(payload.StreamEpoch, payload.AfterSequence, payload.ThreadId);
+        var resyncRequired = !replay.Complete;
+        CodexThreadReadResultPayload history;
+        var sequence = payload.AfterSequence ?? cursor.Sequence;
+        if (!resyncRequired)
+        {
+            // The client already has a view at this cursor. Empty history is deliberately
+            // not a replacement snapshot; preserve it and replay only missing events.
+            history = new(payload.ThreadId, null, null, [], [], false);
+            var replayResult = BuildWatchResult(payload.ThreadId, cursor.Epoch, sequence, history, replay.Events,
+                resyncRequired: false, reason);
+            if (TrySerializeWatchResult(replayResult, out var serializedReplay))
+                return new(true, null, null, serializedReplay);
+            // The retained stream is larger than one response. A current snapshot may
+            // fit; do not emit an oversized frame or label a partial replay complete.
+            resyncRequired = true;
+        }
+        if (resyncRequired)
+        {
+            var historyResult = await _dispatcher.ReadThreadAsync(payload.ThreadId, token).ConfigureAwait(false);
+            if (!historyResult.Succeeded || historyResult.Result is null) return historyResult;
+            history = historyResult.Result.Value.Deserialize<CodexThreadReadResultPayload>(RelayJson.Options)!;
+            replay = _journal.Read(cursor.Epoch, cursor.Sequence, payload.ThreadId);
+            if (!replay.Complete) return new(false, "STREAM_CHANGED_RETRY_WATCH", "连接或事件窗口已变化，请重新同步。", null);
+            sequence = cursor.Sequence;
+        }
+        else throw new InvalidOperationException("Watch response selection failed.");
+        var result = BuildWatchResult(payload.ThreadId, cursor.Epoch, sequence, history, replay.Events, true, reason);
+        return TrySerializeWatchResult(result, out var serialized)
+            ? new(true, null, null, serialized)
+            : new(false, "WATCH_RESPONSE_TOO_LARGE", "会话同步内容超过单次传输上限；已保留原内容，当前尚未同步。", null);
+    }
+
+    private ThreadWatchResultPayload BuildWatchResult(string threadId, string epoch, long sequence,
+        CodexThreadReadResultPayload history, IReadOnlyList<CodexEventPayload> events, bool resyncRequired, string? reason)
+    {
+        var approvals = _bridge.Approvals.PendingApprovals.Where(a => a.ThreadId == threadId)
+            .Select(a => new ApprovalRequestedPayload(a.ApprovalId, a.Method, a.ThreadId, a.TurnId, a.ItemId,
+                a.Command, a.Cwd, a.Reason, a.AvailableDecisions, a.RequestedAt.ToUnixTimeMilliseconds(), a.IsResolving)).ToArray();
+        return new(threadId, _bridge.ServiceInstanceId, epoch, sequence,
+            history, MapSnapshot(_state.Snapshot), approvals, events, resyncRequired, reason is null, reason);
+    }
+
+    internal static bool TrySerializeWatchResult(ThreadWatchResultPayload result, out JsonElement serialized)
+    {
+        serialized = JsonSerializer.SerializeToElement(result, RelayJson.Options);
+        var payload = new ControlResultPayload(ControlResultStatus.Succeeded, null, null, serialized);
+        if (JsonSerializer.SerializeToUtf8Bytes(payload, RelayJson.Options).Length <= 256 * 1024) return true;
+        serialized = default;
+        return false;
+    }
+
+    private async Task RecoverWatchesAsync()
+    {
+        try
+        {
+            foreach (var entry in _watches.ToArray())
+            {
+                var threadId = entry.Key[(entry.Key.LastIndexOf(':') + 1)..];
+                await _dispatcher.SharedSessions.JoinAsync(threadId, _lifetime.Token).ConfigureAwait(false);
+                _watches[entry.Key] = _bridge.ConnectionEpoch;
+            }
+            PublishEvent(ToEvent("StreamGap", null, null, null, new { resyncRequired = true }));
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        { _log.Warning("shared_watch_restore_failed", "Shared subscriptions require resynchronization."); }
+        catch (OperationCanceledException) { }
+        finally { Interlocked.Exchange(ref _recoveringWatches, 0); }
     }
 
     private CodexEventPayload ToEvent<TPayload>(
@@ -756,7 +932,7 @@ public sealed class RelayClient : IAsyncDisposable
         return builder.Uri;
     }
 
-    private static CodexSnapshotPayload MapSnapshot(CodexStateSnapshot snapshot) => new(
+    private CodexSnapshotPayload MapSnapshot(CodexStateSnapshot snapshot) => new(
         snapshot.Revision,
         snapshot.Status.ToString(),
         snapshot.ActiveThreadId,
@@ -783,7 +959,12 @@ public sealed class RelayClient : IAsyncDisposable
             active.ChangedFiles,
             active.PendingApprovalCount,
             active.LastAgentMessage,
-            active.LastError)).ToArray());
+            active.LastError)).ToArray(),
+        _bridge.ServiceInstanceId, _journal.Cursor.Epoch, _journal.Cursor.Sequence, _bridge.IsSharedSession,
+        snapshot.ConnectionState, _bridge.IsSharedSession ? ["sharedSessionV1"] : [],
+        snapshot.Threads.Select(thread => new CodexThreadStatePayload(thread.ThreadId, thread.ThreadState,
+            thread.ActiveTurnId, thread.LastTurnId, thread.LastTurnStatus, thread.Activity.ToString(),
+            thread.WaitingOnApproval, thread.WaitingOnUserInput, thread.RequiresRefresh ? "stale" : "current")).ToArray());
 
     private static string NewRequestId() => string.Concat("req_", Guid.NewGuid().ToString("N"));
 }

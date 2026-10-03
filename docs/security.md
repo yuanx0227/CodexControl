@@ -10,14 +10,24 @@
 
 ### Codex Desktop 运行时
 
-- 不附加、读取或控制 Desktop 已打开的会话；
+- 不附加或注入原生独占 stdio Desktop；共享模式只访问 Desktop 和 Agent 共同连接的公开 WS 服务；
 - Desktop 外部会话不通过文件监视、私有 IPC 或 UI 抓取伪造实时订阅；
 - PATH 不可用时只从当前用户 AppX Package Repository 读取 `OpenAI.Codex_*` 的 `PackageRootFolder`；
 - 严格校验目标仍位于 `WindowsApps\OpenAI.Codex_*`，只接受固定四个运行时文件；
 - 运行时只复制到当前用户数据目录，不修改 WindowsApps；
 - 以 Desktop 包版本隔离目录，并通过 staging directory + atomic move 发布；
-- 每次启动仍执行 `--version`、`--remote` 与 app-server stdio 能力检查；
+- 独立stdio模式每次启动仍执行 `--version`、`--remote` 与 app-server stdio 能力检查；共享模式核验manifest中的实际服务镜像版本、进程/监听身份和公开WS握手；
 - 不复制或上传 Codex 配置、OpenAI API Key、Endpoint 或用户数据。
+
+### 共享服务与权限
+
+- 共享服务仅监听 `127.0.0.1`。本机 manifest 只保存进程身份，不含认证或原始会话内容；每次连接重新核对身份，无静默 stdio 回退。
+- `SharedProjectRoots` 由本机用户显式选择，默认空；网络传入的 cwd、首次 thread/read 返回 cwd 均不能建立项目授权。创建/新增输入/正向审批校验实际范围，拒绝与取消及绑定目标的停止保持可用。
+- 当前 Thread 专属 visualization 目录按已验证规则精确匹配并检查重解析点，不放行整个 `.codex` 或其他 Thread。未知额外目录、网络写策略等返回具体待核实原因，不覆盖共享会话权限。
+- `SharedAllowStandardTemporaryDirectories` 默认 false；本机显式启用前须确认共享服务使用当前用户标准临时目录且无自定义 TMPDIR。Agent 只检查自己的标准路径条件，不能以此宣称读到了外部服务环境。开关不修改上游 sandbox。
+- 审批由人决定；正向响应前重新读取公开有效范围，发送后等待服务端 resolved。当前公开接口没有跨 Desktop 的原子策略比较条件，回读检查存在并发设置变化窗口，不宣称提供强制跨客户端锁。
+- Agent 将共享修改操作的 Controller/requestId/类型写入本地 submission ledger，不保存 Prompt、输出、审批决定或摘要。重启后的不确定提交返回 `CONTROL_OUTCOME_UNKNOWN`，不自动重发。停止/明确拒绝使用有界内存去重，磁盘满或损坏仍可限制执行；进程重启可能再次提交同一个限制性动作，由绑定的 Turn/审批身份保证不作用于新任务。
+- Ledger 上限 10000 项后拒绝新增工作，不能直接删除后自动重放旧请求。事件环仅存在内存；Relay 数据库存储脱敏运行元数据，响应正文、命令、差异和错误正文不进入快照持久化。
 
 ## 2. 密钥
 

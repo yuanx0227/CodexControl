@@ -1,665 +1,462 @@
-using System.Collections.Immutable;
 using System.Text.Json;
 using CodexControl.Agent.Codex;
 
 namespace CodexControl.Agent.State;
 
-/// <summary>
-/// Codex 状态的唯一写入点。外部只能读取不可变快照。
-/// </summary>
+/// <summary>Single writer for per-thread execution state. Connection loss never completes a turn.</summary>
 public sealed class CodexStateManager
 {
     private readonly object _gate = new();
+    private readonly Dictionary<string, ThreadEntry> _threads = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, PendingApprovalContext> _pendingApprovals = new(StringComparer.Ordinal);
+    // Inactive identities prevent delayed items from reviving an old turn. They do
+    // not imply a successful result; LastTurnStatus only comes from terminal data.
+    private readonly HashSet<(string Thread, string Turn)> _inactiveTurns = [];
+    private readonly Queue<(string Thread, string Turn)> _inactiveOrder = new();
     private CodexStateSnapshot _snapshot = CodexStateSnapshot.Initial;
-    private ImmutableDictionary<string, CodexActiveTurnSnapshot> _activeTurns =
-        ImmutableDictionary<string, CodexActiveTurnSnapshot>.Empty.WithComparers(StringComparer.Ordinal);
-    private ImmutableDictionary<string, string> _threadProjects =
-        ImmutableDictionary<string, string>.Empty.WithComparers(StringComparer.Ordinal);
-    private ImmutableDictionary<string, PendingApprovalContext> _pendingApprovals =
-        ImmutableDictionary<string, PendingApprovalContext>.Empty.WithComparers(StringComparer.Ordinal);
 
     public CodexStateSnapshot Snapshot => Volatile.Read(ref _snapshot);
-
+    public bool AwaitServerResolution { get; set; }
     public event Action<CodexStateSnapshot>? SnapshotChanged;
 
-    public void MarkStarting() => ResetActivity(snapshot => snapshot with
-    {
-        Status = CodexActivityStatus.Starting,
-        ActiveThreadId = null,
-        ActiveTurnId = null,
-        StartedAt = null,
-        CurrentActivity = "Starting Codex app-server",
-        RunningCommand = null,
-        PendingApprovalCount = 0,
-        LastError = null,
-    });
+    public void MarkStarting() => MarkConnectionState("connecting");
 
-    public void MarkIdle() => ResetActivity(snapshot => snapshot with
+    public void MarkIdle()
     {
-        Status = CodexActivityStatus.Idle,
-        ActiveThreadId = null,
-        ActiveTurnId = null,
-        StartedAt = null,
-        CurrentActivity = null,
-        RunningCommand = null,
-        PendingApprovalCount = 0,
-        LastError = null,
-    });
+        lock (_gate)
+        {
+            Publish(_snapshot with { ConnectionState = "online", LastError = null },
+                fallback: CodexActivityStatus.Idle);
+        }
+    }
 
-    public void MarkOffline(string? reason = null) => ResetActivity(snapshot => snapshot with
-    {
-        Status = CodexActivityStatus.Offline,
-        ActiveThreadId = null,
-        ActiveTurnId = null,
-        StartedAt = null,
-        CurrentActivity = null,
-        RunningCommand = null,
-        PendingApprovalCount = 0,
-        LastError = reason,
-    });
+    public void MarkOffline(string? reason = null) => SetConnectionState("offline", reason);
+    public void MarkFailed(string reason) => SetConnectionState("offline", reason);
+    public void MarkConnectionState(string state) => SetConnectionState(state, null);
 
-    public void MarkFailed(string reason) => ResetActivity(snapshot => snapshot with
+    private void SetConnectionState(string state, string? reason)
     {
-        Status = CodexActivityStatus.Failed,
-        ActiveThreadId = null,
-        ActiveTurnId = null,
-        StartedAt = null,
-        CurrentActivity = null,
-        RunningCommand = null,
-        PendingApprovalCount = 0,
-        LastError = reason,
-    });
+        if (state is not ("connecting" or "online" or "reconnecting" or "offline"))
+            throw new ArgumentOutOfRangeException(nameof(state));
+        lock (_gate)
+        {
+            if (state != "online")
+                foreach (var entry in _threads.Values) entry.RequiresRefresh = true;
+            Publish(_snapshot with { ConnectionState = state, LastError = reason }, fallback:
+                state is "connecting" or "reconnecting" ? CodexActivityStatus.Starting :
+                state == "online" ? CodexActivityStatus.Idle : CodexActivityStatus.Offline);
+        }
+    }
 
-    public void SetRelayConnected(bool connected) => Update(snapshot => snapshot with
+    /// <summary>Request IDs are scoped to the old connection; server flags remain until recovery.</summary>
+    public void ResetConnectionApprovals()
     {
-        RelayConnected = connected,
-    });
+        lock (_gate)
+        {
+            _pendingApprovals.Clear();
+            foreach (var entry in _threads.Values) entry.RequiresRefresh = true;
+            Publish(_snapshot);
+        }
+    }
 
-    public void SetPairedControllerCount(int count) => Update(snapshot => snapshot with
+    public void SetRelayConnected(bool connected)
     {
-        PairedControllerCount = Math.Max(0, count),
-    });
+        lock (_gate) Publish(_snapshot with { RelayConnected = connected });
+    }
+
+    public void SetPairedControllerCount(int count)
+    {
+        lock (_gate) Publish(_snapshot with { PairedControllerCount = Math.Max(0, count) });
+    }
+
+    /// <summary>Accepts public thread/read or thread/resume result. Never changes server settings.</summary>
+    public bool ApplyThreadContext(JsonElement data, long? expectedRevision = null)
+    {
+        if (data.ValueKind != JsonValueKind.Object) return false;
+        if (data.TryGetProperty("result", out var result)) data = result;
+        if (data.ValueKind != JsonValueKind.Object) return false;
+        if (data.TryGetProperty("thread", out var thread)) data = thread;
+        var id = FindString(data, "id");
+        if (string.IsNullOrWhiteSpace(id)) return false;
+        lock (_gate)
+        {
+            // A caller can reject a snapshot that raced with a newer notification.
+            var entry = GetThread(id);
+            if (expectedRevision is not null && entry.Revision > expectedRevision) return false;
+            entry.CurrentProject = FindString(data, "cwd") ?? entry.CurrentProject;
+            JsonElement? latest = null;
+            JsonElement? running = null;
+            if (TryFind(data, out var turns, "turns") && turns.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var turn in turns.EnumerateArray())
+                {
+                    latest = turn;
+                    if (FindString(turn, "status") == "inProgress") running = turn;
+                }
+            }
+            var type = FindString(data, "status", "type") ?? FindString(data, "status");
+            if (running is { } active && FindString(active, "id") is { } turnId &&
+                !_inactiveTurns.Contains((id, turnId)))
+            {
+                StartTurn(entry, turnId, ReadTimestamp(active, "startedAt"));
+            }
+            else if (latest is { } last && FindString(last, "id") is { } lastId &&
+                     FindString(last, "status") is "completed" or "interrupted" or "failed")
+            {
+                // Do not overwrite a different running turn from newer live notifications.
+                if (entry.TurnId is null || entry.ThreadState != "active" || entry.TurnId == lastId)
+                    FinishTurn(entry, lastId, FindString(last, "status")!);
+            }
+            if (type is not null) SetThreadStatus(entry, type, ReadFlags(data, "status", "activeFlags"));
+            else if (entry.ThreadState == "unknown" && running is null) entry.ThreadState = "idle";
+            entry.RequiresRefresh = entry.ThreadState == "active" && entry.TurnId is null;
+            Touch(entry);
+            Publish(_snapshot, entry);
+            return true;
+        }
+    }
 
     public void ApplyServerMessage(JsonElement message)
     {
-        if (!JsonRpcProtocol.TryGetMethod(message, out var method))
+        if (!JsonRpcProtocol.TryGetMethod(message, out var method)) return;
+        if (method is not ("serverRequest/resolved" or "thread/started" or "thread/status/changed" or
+            "turn/started" or "turn/completed" or "item/started" or "item/completed" or "item/agentMessage/delta") &&
+            !method.EndsWith("/requestApproval", StringComparison.Ordinal)) return;
+        lock (_gate)
         {
-            return;
-        }
-
-        switch (method)
-        {
-            case "thread/started":
-                ApplyThreadStarted(message);
-                break;
-            case "turn/started":
-                ApplyTurnStarted(message);
-                break;
-            case "thread/status/changed":
-                ApplyThreadStatusChanged(message);
-                break;
-            case "item/started":
-                ApplyItemStarted(message);
-                break;
-            case "item/completed":
-                ApplyItemCompleted(message);
-                break;
-            case "turn/completed":
-                ApplyTurnCompleted(message);
-                break;
-            case "serverRequest/resolved":
-                ApplyServerRequestResolved(message);
-                break;
-            default:
-                if (method.EndsWith("/requestApproval", StringComparison.Ordinal) &&
-                    JsonRpcProtocol.TryGetId(message, out var approvalId))
-                {
-                    ApplyApprovalRequested(JsonRpcProtocol.GetIdKey(approvalId), message);
-                }
-
-                break;
+            if (method == "serverRequest/resolved")
+            {
+                if (TryFind(message, out var requestId, "params", "requestId"))
+                    ResolveApproval(JsonRpcProtocol.GetIdKey(requestId));
+                return;
+            }
+            var threadId = FindThreadId(message);
+            var turnId = FindTurnId(message);
+            // A known turn can identify its thread, but current UI focus cannot.
+            if (threadId is null && turnId is not null)
+                threadId = _threads.Values.FirstOrDefault(value => value.TurnId == turnId)?.Id;
+            if (threadId is null) return;
+            var entry = GetThread(threadId);
+            switch (method)
+            {
+                case "thread/started":
+                    entry.CurrentProject = FindString(message, "params", "thread", "cwd") ?? entry.CurrentProject;
+                    if (TryFind(message, out var threadStatus, "params", "thread", "status"))
+                        SetThreadStatus(entry, FindString(threadStatus, "type") ?? "unknown", ReadFlags(threadStatus, "activeFlags"));
+                    else if (entry.ThreadState == "unknown") entry.ThreadState = "idle";
+                    break;
+                case "thread/status/changed":
+                    SetThreadStatus(entry, FindString(message, "params", "status", "type") ?? "unknown",
+                        ReadFlags(message, "params", "status", "activeFlags"));
+                    break;
+                case "turn/started":
+                    if (turnId is null || _inactiveTurns.Contains((threadId, turnId))) return;
+                    StartTurn(entry, turnId, TryFind(message, out var turn, "params", "turn")
+                        ? ReadTimestamp(turn, "startedAt") : null);
+                    break;
+                case "turn/completed":
+                    if (turnId is null || (entry.TurnId is not null && entry.TurnId != turnId)) return;
+                    if (entry.ThreadState == "active" && entry.TurnId is null && _inactiveTurns.Contains((threadId, turnId)))
+                    {
+                        // A new active turn is still being identified. The old terminal
+                        // result is useful, but cannot end the newly reported activity.
+                        entry.LastTurnId = turnId;
+                        entry.LastTurnStatus = TerminalStatus(FindString(message, "params", "turn", "status"));
+                        break;
+                    }
+                    FinishTurn(entry, turnId, FindString(message, "params", "turn", "status") ?? "completed");
+                    break;
+                case "item/started":
+                case "item/completed":
+                case "item/agentMessage/delta":
+                    if (!MatchesActiveTurn(entry, turnId)) return;
+                    ApplyItem(entry, message, method);
+                    break;
+                default:
+                    if (method.EndsWith("/requestApproval", StringComparison.Ordinal) &&
+                        JsonRpcProtocol.TryGetId(message, out var approvalId))
+                    {
+                        if (turnId is null || _inactiveTurns.Contains((threadId, turnId)) ||
+                            (entry.TurnId is not null && entry.TurnId != turnId)) return;
+                        if (entry.TurnId is null) StartTurn(entry, turnId, null);
+                        _pendingApprovals[JsonRpcProtocol.GetIdKey(approvalId)] = new(threadId, turnId);
+                        entry.WaitingOnApproval = true;
+                    }
+                    else return;
+                    break;
+            }
+            Touch(entry);
+            Publish(_snapshot, entry);
         }
     }
 
     public void ApplyClientMessage(JsonElement message)
     {
+        if (AwaitServerResolution) return;
         if (JsonRpcProtocol.IsResponse(message) && JsonRpcProtocol.TryGetId(message, out var id))
         {
-            ResolveApproval(JsonRpcProtocol.GetIdKey(id));
-        }
-    }
-
-    private void ApplyThreadStarted(JsonElement message)
-    {
-        var threadId = FindString(message, "params", "thread", "id") ??
-                       FindString(message, "params", "threadId");
-        var project = FindString(message, "params", "thread", "cwd");
-        if (string.IsNullOrWhiteSpace(threadId))
-        {
-            return;
-        }
-
-        lock (_gate)
-        {
-            if (!string.IsNullOrWhiteSpace(project))
-            {
-                _threadProjects = _threadProjects.SetItem(threadId, project);
-                if (_activeTurns.TryGetValue(threadId, out var active))
-                {
-                    _activeTurns = _activeTurns.SetItem(
-                        threadId,
-                        active with { CurrentProject = project });
-                }
-            }
-
-            Publish(_activeTurns.Count == 0
-                ? _snapshot with
-                {
-                    ActiveThreadId = threadId,
-                    ActiveTurnId = null,
-                    CurrentProject = project ?? _snapshot.CurrentProject,
-                    LastError = null,
-                }
-                : _snapshot with { LastError = null });
-        }
-    }
-
-    private void ApplyTurnStarted(JsonElement message)
-    {
-        var threadId = FindThreadId(message);
-        var turnId = FindTurnId(message);
-        if (string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(turnId))
-        {
-            return;
-        }
-
-        lock (_gate)
-        {
-            var now = DateTimeOffset.UtcNow;
-            var active = new CodexActiveTurnSnapshot(
-                threadId,
-                turnId,
-                CodexActivityStatus.Thinking,
-                now,
-                now,
-                _threadProjects.GetValueOrDefault(threadId) ?? _snapshot.CurrentProject,
-                "Codex is thinking",
-                null,
-                [],
-                PendingApprovalCount(threadId, turnId),
-                null,
-                null);
-            _activeTurns = _activeTurns.SetItem(threadId, active);
-            Publish(Focus(_snapshot, active));
-        }
-    }
-
-    private void ApplyThreadStatusChanged(JsonElement message)
-    {
-        var threadId = FindThreadId(message);
-        var type = FindString(message, "params", "status", "type");
-        if (string.IsNullOrWhiteSpace(threadId)) return;
-
-        lock (_gate)
-        {
-            if (!_activeTurns.TryGetValue(threadId, out var active)) return;
-            if (type == "active")
-            {
-                var flags = TryFindElement(message, out var values, "params", "status", "activeFlags") &&
-                            values.ValueKind == JsonValueKind.Array
-                    ? values.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String)
-                        .Select(value => value.GetString()).ToArray()
-                    : [];
-                var status = flags.Contains("waitingOnApproval")
-                    ? CodexActivityStatus.WaitingApproval
-                    : flags.Contains("waitingOnUserInput")
-                        ? CodexActivityStatus.WaitingUserInput
-                        : active.Status is CodexActivityStatus.WaitingApproval or CodexActivityStatus.WaitingUserInput
-                            ? CodexActivityStatus.Thinking
-                            : active.Status;
-                var updated = active with
-                {
-                    Status = status,
-                    LastActivityAt = DateTimeOffset.UtcNow,
-                    CurrentActivity = status == CodexActivityStatus.WaitingApproval ? "Waiting for approval"
-                        : status == CodexActivityStatus.WaitingUserInput ? "Waiting for user input"
-                        : status == CodexActivityStatus.Thinking ? "Codex is thinking" : active.CurrentActivity,
-                };
-                _activeTurns = _activeTurns.SetItem(threadId, updated);
-                Publish(Focus(_snapshot, updated));
-            }
-            else if (type is "idle" or "notLoaded" or "systemError")
-            {
-                _activeTurns = _activeTurns.Remove(threadId);
-                _pendingApprovals = _pendingApprovals.RemoveRange(_pendingApprovals
-                    .Where(entry => entry.Value.ThreadId == threadId).Select(entry => entry.Key));
-                var next = _activeTurns.Values.OrderByDescending(value => value.LastActivityAt).FirstOrDefault();
-                Publish(next is not null ? Focus(_snapshot, next) : _snapshot with
-                {
-                    Status = type == "systemError" ? CodexActivityStatus.Failed : CodexActivityStatus.Idle,
-                    ActiveThreadId = threadId,
-                    ActiveTurnId = null,
-                    CurrentActivity = null,
-                    RunningCommand = null,
-                    LastError = type == "systemError" ? "Thread system error" : null,
-                });
-            }
-        }
-    }
-
-    private void ApplyItemStarted(JsonElement message)
-    {
-        var itemType = FindString(message, "params", "item", "type");
-        var command = FindString(message, "params", "item", "command");
-        var status = itemType switch
-        {
-            "commandExecution" when LooksLikeTestCommand(command) => CodexActivityStatus.RunningTests,
-            "commandExecution" => CodexActivityStatus.RunningCommand,
-            "fileChange" => CodexActivityStatus.Editing,
-            "reasoning" => CodexActivityStatus.Thinking,
-            "agentMessage" => CodexActivityStatus.Thinking,
-            _ => CodexActivityStatus.Reading,
-        };
-
-        lock (_gate)
-        {
-            if (TryResolveActiveTurn(message, out var threadId, out var active))
-            {
-                var updated = active with
-                {
-                    Status = status,
-                    LastActivityAt = DateTimeOffset.UtcNow,
-                    CurrentActivity = itemType,
-                    RunningCommand = command,
-                    LastError = null,
-                };
-                _activeTurns = _activeTurns.SetItem(threadId, updated);
-                Publish(Focus(_snapshot, updated));
-                return;
-            }
-
-            Publish(_snapshot with
-            {
-                Status = status,
-                CurrentActivity = itemType,
-                RunningCommand = command,
-            });
-        }
-    }
-
-    private void ApplyItemCompleted(JsonElement message)
-    {
-        var itemType = FindString(message, "params", "item", "type");
-        var agentMessage = itemType == "agentMessage"
-            ? FindString(message, "params", "item", "text")
-            : null;
-        var changedFiles = itemType == "fileChange"
-            ? ReadChangedFiles(message)
-            : null;
-        lock (_gate)
-        {
-            if (TryResolveActiveTurn(message, out var threadId, out var active))
-            {
-                var pendingCount = PendingApprovalCount(active.ThreadId, active.TurnId);
-                var updated = active with
-                {
-                    Status = pendingCount > 0
-                        ? CodexActivityStatus.WaitingApproval
-                        : CodexActivityStatus.Thinking,
-                    LastActivityAt = DateTimeOffset.UtcNow,
-                    CurrentActivity = pendingCount > 0 ? "Waiting for approval" : "Codex is thinking",
-                    RunningCommand = null,
-                    LastAgentMessage = agentMessage ?? active.LastAgentMessage,
-                    ChangedFiles = changedFiles ?? active.ChangedFiles,
-                    PendingApprovalCount = pendingCount,
-                };
-                _activeTurns = _activeTurns.SetItem(threadId, updated);
-                Publish(Focus(_snapshot, updated));
-                return;
-            }
-
-            if (_snapshot.Status is CodexActivityStatus.Completed or
-                CodexActivityStatus.Interrupted or CodexActivityStatus.Failed)
-            {
-                return;
-            }
-
-            Publish(_snapshot with
-            {
-                Status = _pendingApprovals.Count > 0
-                    ? CodexActivityStatus.WaitingApproval
-                    : CodexActivityStatus.Thinking,
-                CurrentActivity = _pendingApprovals.Count > 0 ? "Waiting for approval" : "Codex is thinking",
-                RunningCommand = null,
-                LastAgentMessage = agentMessage ?? _snapshot.LastAgentMessage,
-                ChangedFiles = changedFiles ?? _snapshot.ChangedFiles,
-            });
-        }
-    }
-
-    private void ApplyTurnCompleted(JsonElement message)
-    {
-        var rawStatus = FindString(message, "params", "turn", "status") ??
-                        FindString(message, "params", "status");
-        var status = rawStatus switch
-        {
-            "interrupted" => CodexActivityStatus.Interrupted,
-            "failed" => CodexActivityStatus.Failed,
-            _ => CodexActivityStatus.Completed,
-        };
-
-        lock (_gate)
-        {
-            var found = TryResolveActiveTurn(message, out var threadId, out var completed);
-            // A delayed completion from an earlier turn must not clear the current turn or its approvals.
-            if (!found && _activeTurns.ContainsKey(threadId)) return;
-            var turnId = FindTurnId(message) ?? (found ? completed.TurnId : null);
-            if (found)
-            {
-                _activeTurns = _activeTurns.Remove(threadId);
-                _threadProjects = _threadProjects.Remove(threadId);
-            }
-
-            if (!string.IsNullOrWhiteSpace(threadId) || !string.IsNullOrWhiteSpace(turnId))
-            {
-                _pendingApprovals = _pendingApprovals.RemoveRange(
-                    _pendingApprovals
-                        .Where(entry =>
-                            (string.IsNullOrWhiteSpace(threadId) || entry.Value.ThreadId == threadId) &&
-                            (string.IsNullOrWhiteSpace(turnId) || entry.Value.TurnId == turnId))
-                        .Select(static entry => entry.Key));
-            }
-
-            var next = _activeTurns.Values
-                .OrderByDescending(static value => value.LastActivityAt)
-                .FirstOrDefault();
-            if (next is not null)
-            {
-                Publish(Focus(_snapshot, next));
-                return;
-            }
-
-            Publish(_snapshot with
-            {
-                Status = status,
-                ActiveThreadId = found ? completed.ThreadId : FindThreadId(message) ?? _snapshot.ActiveThreadId,
-                ActiveTurnId = null,
-                StartedAt = found ? completed.StartedAt : _snapshot.StartedAt,
-                CurrentProject = found ? completed.CurrentProject : _snapshot.CurrentProject,
-                CurrentActivity = null,
-                RunningCommand = null,
-                PendingApprovalCount = 0,
-                ChangedFiles = found ? completed.ChangedFiles : _snapshot.ChangedFiles,
-                LastAgentMessage = found ? completed.LastAgentMessage : _snapshot.LastAgentMessage,
-                LastError = status == CodexActivityStatus.Failed ? "Turn failed" : null,
-            });
-        }
-    }
-
-    private void ApplyApprovalRequested(string requestId, JsonElement message)
-    {
-        lock (_gate)
-        {
-            var threadId = FindThreadId(message);
-            var turnId = FindTurnId(message);
-            if (string.IsNullOrWhiteSpace(threadId) && _activeTurns.Count == 1)
-            {
-                var only = _activeTurns.Values.Single();
-                threadId = only.ThreadId;
-                turnId ??= only.TurnId;
-            }
-
-            _pendingApprovals = _pendingApprovals.SetItem(
-                requestId,
-                new PendingApprovalContext(threadId, turnId));
-            if (!string.IsNullOrWhiteSpace(threadId) &&
-                _activeTurns.TryGetValue(threadId, out var active))
-            {
-                var updated = active with
-                {
-                    Status = CodexActivityStatus.WaitingApproval,
-                    LastActivityAt = DateTimeOffset.UtcNow,
-                    CurrentActivity = "Waiting for approval",
-                    PendingApprovalCount = PendingApprovalCount(active.ThreadId, active.TurnId),
-                };
-                _activeTurns = _activeTurns.SetItem(threadId, updated);
-                Publish(Focus(_snapshot, updated));
-                return;
-            }
-
-            Publish(_snapshot with
-            {
-                Status = CodexActivityStatus.WaitingApproval,
-                CurrentActivity = "Waiting for approval",
-                PendingApprovalCount = _pendingApprovals.Count,
-            });
-        }
-    }
-
-    private void ApplyServerRequestResolved(JsonElement message)
-    {
-        if (TryFindElement(message, out var requestId, "params", "requestId"))
-        {
-            ResolveApproval(JsonRpcProtocol.GetIdKey(requestId));
+            lock (_gate) ResolveApproval(JsonRpcProtocol.GetIdKey(id));
         }
     }
 
     private void ResolveApproval(string requestId)
     {
-        lock (_gate)
+        if (!_pendingApprovals.Remove(requestId, out var context)) return;
+        if (_threads.TryGetValue(context.ThreadId, out var entry) && entry.TurnId == context.TurnId)
         {
-            if (!_pendingApprovals.TryGetValue(requestId, out var context))
+            entry.WaitingOnApproval = PendingApprovalCount(entry) > 0;
+            Touch(entry);
+            Publish(_snapshot, entry);
+        }
+        else Publish(_snapshot);
+    }
+
+    private void SetThreadStatus(ThreadEntry entry, string type, IReadOnlyList<string> flags)
+    {
+        entry.ThreadState = type is "active" or "idle" or "notLoaded" or "systemError" ? type : "unknown";
+        if (type == "active")
+        {
+            if (entry.TurnId is not null && _inactiveTurns.Contains((entry.Id, entry.TurnId)))
+                entry.TurnId = null;
+            entry.WaitingOnApproval = flags.Contains("waitingOnApproval") || PendingApprovalCount(entry) > 0;
+            entry.WaitingOnUserInput = flags.Contains("waitingOnUserInput");
+            entry.RequiresRefresh = entry.TurnId is null;
+        }
+        else
+        {
+            if (type == "idle" && entry.TurnId is not null) RememberInactive(entry.Id, entry.TurnId);
+            entry.WaitingOnApproval = false;
+            entry.WaitingOnUserInput = false;
+            entry.RunningCommand = null;
+            RemoveApprovals(entry.Id, null);
+            // Keep the last turn identity until its completion notification arrives.
+            // idle says nothing about whether that turn completed, failed or was interrupted.
+            entry.RequiresRefresh = type is "notLoaded" or "systemError" or "unknown";
+        }
+    }
+
+    private void StartTurn(ThreadEntry entry, string turnId, DateTimeOffset? startedAt)
+    {
+        if (entry.TurnId != turnId)
+        {
+            var retainFlags = entry.ThreadState == "active" && entry.TurnId is null;
+            RemoveApprovals(entry.Id, null);
+            entry.StartedAt = startedAt ?? DateTimeOffset.UtcNow;
+            entry.ChangedFiles = [];
+            entry.LastAgentMessage = null;
+            entry.RunningCommand = null;
+            entry.Activity = CodexActivityStatus.Thinking;
+            entry.CurrentActivity = "Codex is thinking";
+            if (!retainFlags)
             {
-                return;
+                entry.WaitingOnApproval = false;
+                entry.WaitingOnUserInput = false;
             }
-
-            _pendingApprovals = _pendingApprovals.Remove(requestId);
-            if (!string.IsNullOrWhiteSpace(context.ThreadId) &&
-                _activeTurns.TryGetValue(context.ThreadId, out var active))
-            {
-                var pendingCount = PendingApprovalCount(active.ThreadId, active.TurnId);
-                var updated = active with
-                {
-                    Status = pendingCount == 0
-                        ? CodexActivityStatus.Thinking
-                        : CodexActivityStatus.WaitingApproval,
-                    LastActivityAt = DateTimeOffset.UtcNow,
-                    CurrentActivity = pendingCount == 0
-                        ? "Codex is thinking"
-                        : "Waiting for approval",
-                    PendingApprovalCount = pendingCount,
-                };
-                _activeTurns = _activeTurns.SetItem(active.ThreadId, updated);
-                Publish(Focus(_snapshot, updated));
-                return;
-            }
-
-            Publish(_snapshot with
-            {
-                Status = _pendingApprovals.Count == 0
-                    ? CodexActivityStatus.Thinking
-                    : CodexActivityStatus.WaitingApproval,
-                CurrentActivity = _pendingApprovals.Count == 0
-                    ? "Codex is thinking"
-                    : "Waiting for approval",
-                PendingApprovalCount = _pendingApprovals.Count,
-            });
         }
+        entry.TurnId = turnId;
+        entry.ThreadState = "active";
+        entry.RequiresRefresh = false;
+        entry.LastError = null;
     }
 
-    private void Update(Func<CodexStateSnapshot, CodexStateSnapshot> transform)
+    private void FinishTurn(ThreadEntry entry, string turnId, string rawStatus)
     {
-        lock (_gate)
+        var status = TerminalStatus(rawStatus);
+        entry.TurnId = turnId;
+        entry.LastTurnId = turnId;
+        entry.LastTurnStatus = status;
+        entry.ThreadState = "idle";
+        entry.WaitingOnApproval = false;
+        entry.WaitingOnUserInput = false;
+        entry.RunningCommand = null;
+        entry.CurrentActivity = null;
+        entry.RequiresRefresh = false;
+        entry.LastError = status == "failed" ? "Turn failed" : null;
+        RemoveApprovals(entry.Id, turnId);
+        RememberInactive(entry.Id, turnId);
+    }
+
+    private bool MatchesActiveTurn(ThreadEntry entry, string? turnId)
+    {
+        if (entry.ThreadState != "active" || turnId is null || _inactiveTurns.Contains((entry.Id, turnId)))
+            return false;
+        if (entry.TurnId is null)
         {
-            Publish(transform(_snapshot));
+            entry.TurnId = turnId;
+            entry.RequiresRefresh = false;
         }
+        return entry.TurnId == turnId;
     }
 
-    private void ResetActivity(Func<CodexStateSnapshot, CodexStateSnapshot> transform)
+    private static void ApplyItem(ThreadEntry entry, JsonElement message, string method)
     {
-        lock (_gate)
+        var itemType = FindString(message, "params", "item", "type");
+        if (method == "item/started")
         {
-            _activeTurns = _activeTurns.Clear();
-            _threadProjects = _threadProjects.Clear();
-            _pendingApprovals = _pendingApprovals.Clear();
-            Publish(transform(_snapshot));
+            entry.RunningCommand = FindString(message, "params", "item", "command");
+            entry.Activity = itemType switch
+            {
+                "commandExecution" when LooksLikeTestCommand(entry.RunningCommand) => CodexActivityStatus.RunningTests,
+                "commandExecution" => CodexActivityStatus.RunningCommand,
+                "fileChange" => CodexActivityStatus.Editing,
+                "reasoning" or "agentMessage" => CodexActivityStatus.Thinking,
+                _ => CodexActivityStatus.Reading,
+            };
+            entry.CurrentActivity = itemType;
+        }
+        else if (method == "item/completed")
+        {
+            entry.Activity = CodexActivityStatus.Thinking;
+            entry.CurrentActivity = "Codex is thinking";
+            entry.RunningCommand = null;
+            if (itemType == "agentMessage") entry.LastAgentMessage = FindString(message, "params", "item", "text");
+            if (itemType == "fileChange" && TryFind(message, out var changes, "params", "item", "changes") &&
+                changes.ValueKind == JsonValueKind.Array)
+                entry.ChangedFiles = changes.EnumerateArray().Select(change => FindString(change, "path"))
+                    .OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).Take(100).ToArray();
+        }
+        else
+        {
+            entry.Activity = CodexActivityStatus.Thinking;
+            entry.CurrentActivity = "Streaming response";
         }
     }
 
-    private void Publish(CodexStateSnapshot snapshot)
+    private void RemoveApprovals(string threadId, string? turnId)
     {
-        var published = snapshot with
+        foreach (var key in _pendingApprovals.Where(pair => pair.Value.ThreadId == threadId &&
+                     (turnId is null || pair.Value.TurnId == turnId)).Select(pair => pair.Key).ToArray())
+            _pendingApprovals.Remove(key);
+    }
+
+    private int PendingApprovalCount(ThreadEntry entry) => _pendingApprovals.Values.Count(value =>
+        value.ThreadId == entry.Id && (entry.TurnId is null || value.TurnId == entry.TurnId));
+
+    private static string TerminalStatus(string? status) => status is "interrupted" or "failed" ? status : "completed";
+    private void RememberInactive(string threadId, string turnId)
+    {
+        if (_inactiveTurns.Add((threadId, turnId))) _inactiveOrder.Enqueue((threadId, turnId));
+        while (_inactiveOrder.Count > 4096) _inactiveTurns.Remove(_inactiveOrder.Dequeue());
+    }
+
+    private CodexActivityStatus Status(ThreadEntry entry)
+    {
+        if (entry.ThreadState == "active")
+            return entry.WaitingOnApproval || PendingApprovalCount(entry) > 0 ? CodexActivityStatus.WaitingApproval :
+                entry.WaitingOnUserInput ? CodexActivityStatus.WaitingUserInput : entry.Activity;
+        if (entry.LastTurnStatus is not null && entry.LastTurnId == entry.TurnId)
+            return entry.LastTurnStatus switch
+            {
+                "interrupted" => CodexActivityStatus.Interrupted,
+                "failed" => CodexActivityStatus.Failed,
+                _ => CodexActivityStatus.Completed,
+            };
+        return entry.ThreadState == "idle" ? CodexActivityStatus.Idle : CodexActivityStatus.Unknown;
+    }
+
+    private void Publish(CodexStateSnapshot basis, ThreadEntry? changed = null, CodexActivityStatus? fallback = null)
+    {
+        var active = _threads.Values.Where(value => value.ThreadState == "active")
+            .OrderByDescending(value => value.WaitingOnApproval || PendingApprovalCount(value) > 0)
+            .ThenByDescending(value => value.WaitingOnUserInput)
+            .ThenByDescending(value => value.LastActivityAt).ToArray();
+        var focus = active.FirstOrDefault() ?? changed ??
+            (_snapshot.ActiveThreadId is { } id ? _threads.GetValueOrDefault(id) : null);
+        var published = basis with
         {
             Revision = _snapshot.Revision + 1,
             LastActivityAt = DateTimeOffset.UtcNow,
-            ActiveTurns = _activeTurns.Values
-                .OrderByDescending(static value => value.LastActivityAt)
-                .ToArray(),
+            Status = focus is null ? fallback ?? basis.Status : Status(focus),
+            ActiveThreadId = focus?.Id,
+            ActiveTurnId = focus?.ThreadState == "active" ? focus.TurnId : null,
+            StartedAt = focus?.StartedAt,
+            CurrentProject = focus?.CurrentProject,
+            CurrentActivity = focus is null ? null : Status(focus) switch
+            {
+                CodexActivityStatus.WaitingApproval => "Waiting for approval",
+                CodexActivityStatus.WaitingUserInput => "Waiting for user input",
+                _ => focus.ThreadState == "active" ? focus.CurrentActivity : null,
+            },
+            RunningCommand = focus?.ThreadState == "active" ? focus.RunningCommand : null,
+            ChangedFiles = focus?.ChangedFiles ?? [],
+            LastAgentMessage = focus?.LastAgentMessage,
+            LastError = basis.ConnectionState == "online" ? focus?.LastError : basis.LastError,
             PendingApprovalCount = _pendingApprovals.Count,
+            ActiveTurns = active.Where(value => value.TurnId is not null).Select(value => new CodexActiveTurnSnapshot(
+                value.Id, value.TurnId!, Status(value), value.StartedAt, value.LastActivityAt, value.CurrentProject,
+                value.CurrentActivity, value.RunningCommand, value.ChangedFiles, PendingApprovalCount(value),
+                value.LastAgentMessage, value.LastError)).ToArray(),
+            Threads = _threads.Values.Select(value => new CodexThreadStateSnapshot(
+                value.Id, value.ThreadState, value.ThreadState == "active" ? value.TurnId : null,
+                value.LastTurnId, value.LastTurnStatus, Status(value), value.WaitingOnApproval,
+                value.WaitingOnUserInput, value.RequiresRefresh, value.LastActivityAt, value.CurrentProject)).ToArray(),
         };
         Volatile.Write(ref _snapshot, published);
-        InvokeSnapshotChanged(published);
-    }
-
-    private CodexStateSnapshot Focus(
-        CodexStateSnapshot snapshot,
-        CodexActiveTurnSnapshot active) => snapshot with
-    {
-        Status = active.Status,
-        ActiveThreadId = active.ThreadId,
-        ActiveTurnId = active.TurnId,
-        StartedAt = active.StartedAt,
-        CurrentProject = active.CurrentProject,
-        CurrentActivity = active.CurrentActivity,
-        RunningCommand = active.RunningCommand,
-        ChangedFiles = active.ChangedFiles,
-        PendingApprovalCount = _pendingApprovals.Count,
-        LastAgentMessage = active.LastAgentMessage,
-        LastError = active.LastError,
-    };
-
-    private bool TryResolveActiveTurn(
-        JsonElement message,
-        out string threadId,
-        out CodexActiveTurnSnapshot active)
-    {
-        var requestedThreadId = FindThreadId(message);
-        var requestedTurnId = FindTurnId(message);
-        if (!string.IsNullOrWhiteSpace(requestedThreadId) &&
-            _activeTurns.TryGetValue(requestedThreadId, out active!) &&
-            (string.IsNullOrWhiteSpace(requestedTurnId) || active.TurnId == requestedTurnId))
-        {
-            threadId = requestedThreadId;
-            return true;
-        }
-
-        if (!string.IsNullOrWhiteSpace(requestedTurnId))
-        {
-            active = _activeTurns.Values.FirstOrDefault(value => value.TurnId == requestedTurnId)!;
-            if (active is not null)
-            {
-                threadId = active.ThreadId;
-                return true;
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(requestedThreadId) &&
-            string.IsNullOrWhiteSpace(requestedTurnId) &&
-            _activeTurns.Count == 1)
-        {
-            active = _activeTurns.Values.Single();
-            threadId = active.ThreadId;
-            return true;
-        }
-
-        threadId = requestedThreadId ?? string.Empty;
-        active = null!;
-        return false;
-    }
-
-    private int PendingApprovalCount(string threadId, string turnId) =>
-        _pendingApprovals.Values.Count(value =>
-            value.ThreadId == threadId &&
-            (string.IsNullOrWhiteSpace(value.TurnId) || value.TurnId == turnId));
-
-    private void InvokeSnapshotChanged(CodexStateSnapshot snapshot)
-    {
-        var handlers = SnapshotChanged;
-        if (handlers is null)
-        {
-            return;
-        }
-
+        if (SnapshotChanged is not { } handlers) return;
         foreach (Action<CodexStateSnapshot> handler in handlers.GetInvocationList())
         {
-            try
-            {
-                handler(snapshot);
-            }
-            catch
-            {
-                // 观察者只能消费不可变快照，不能破坏状态机。
-            }
+            try { handler(published); }
+            catch { /* Observers cannot interrupt protocol processing. */ }
         }
     }
 
-    private static IReadOnlyList<string> ReadChangedFiles(JsonElement message)
+    private ThreadEntry GetThread(string id)
     {
-        if (!TryFindElement(message, out var changes, "params", "item", "changes") ||
-            changes.ValueKind != JsonValueKind.Array)
-        {
-            return [];
-        }
-
-        return changes.EnumerateArray()
-            .Select(change => change.ValueKind == JsonValueKind.Object &&
-                              change.TryGetProperty("path", out var path) &&
-                              path.ValueKind == JsonValueKind.String
-                ? path.GetString()
-                : null)
-            .Where(static path => !string.IsNullOrWhiteSpace(path))
-            .Cast<string>()
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(100)
-            .ToArray();
+        if (!_threads.TryGetValue(id, out var entry)) _threads[id] = entry = new ThreadEntry(id);
+        return entry;
     }
-
+    private void Touch(ThreadEntry entry)
+    {
+        entry.LastActivityAt = DateTimeOffset.UtcNow;
+        entry.Revision = _snapshot.Revision + 1;
+    }
     private static bool LooksLikeTestCommand(string? command) =>
         command?.Contains(" test", StringComparison.OrdinalIgnoreCase) == true ||
         command?.StartsWith("test", StringComparison.OrdinalIgnoreCase) == true;
-
     private static string? FindThreadId(JsonElement message) =>
-        FindString(message, "params", "threadId") ??
-        FindString(message, "params", "thread", "id") ??
-        FindString(message, "params", "turn", "threadId") ??
-        FindString(message, "params", "item", "threadId");
-
+        FindString(message, "params", "threadId") ?? FindString(message, "params", "thread", "id") ??
+        FindString(message, "params", "turn", "threadId") ?? FindString(message, "params", "item", "threadId");
     private static string? FindTurnId(JsonElement message) =>
-        FindString(message, "params", "turn", "id") ??
-        FindString(message, "params", "turnId") ??
+        FindString(message, "params", "turn", "id") ?? FindString(message, "params", "turnId") ??
         FindString(message, "params", "item", "turnId");
-
-    private static string? FindString(JsonElement root, params string[] path)
-    {
-        return TryFindElement(root, out var value, path) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
-    }
-
-    private static bool TryFindElement(JsonElement root, out JsonElement value, params string[] path)
+    private static string? FindString(JsonElement root, params string[] path) =>
+        TryFind(root, out var value, path) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+    private static DateTimeOffset? ReadTimestamp(JsonElement root, string name) =>
+        TryFind(root, out var value, name) && value.ValueKind == JsonValueKind.Number &&
+        value.TryGetInt64(out var seconds) && seconds is >= 0 and <= 253402300799
+            ? DateTimeOffset.FromUnixTimeSeconds(seconds) : null;
+    private static IReadOnlyList<string> ReadFlags(JsonElement root, params string[] path) =>
+        TryFind(root, out var value, path) && value.ValueKind == JsonValueKind.Array
+            ? value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!).ToArray() : [];
+    private static bool TryFind(JsonElement root, out JsonElement value, params string[] path)
     {
         value = root;
         foreach (var segment in path)
-        {
             if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(segment, out value))
-            {
-                value = default;
-                return false;
-            }
-        }
-
+            { value = default; return false; }
         return true;
     }
 
-    private sealed record PendingApprovalContext(string? ThreadId, string? TurnId);
+    private sealed record PendingApprovalContext(string ThreadId, string TurnId);
+    private sealed class ThreadEntry(string id)
+    {
+        public string Id { get; } = id;
+        public long Revision { get; set; }
+        public string ThreadState { get; set; } = "unknown";
+        public string? TurnId { get; set; }
+        public string? LastTurnId { get; set; }
+        public string? LastTurnStatus { get; set; }
+        public CodexActivityStatus Activity { get; set; } = CodexActivityStatus.Thinking;
+        public bool WaitingOnApproval { get; set; }
+        public bool WaitingOnUserInput { get; set; }
+        public bool RequiresRefresh { get; set; }
+        public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
+        public DateTimeOffset LastActivityAt { get; set; } = DateTimeOffset.UtcNow;
+        public string? CurrentProject { get; set; }
+        public string? CurrentActivity { get; set; } = "Synchronizing active turn";
+        public string? RunningCommand { get; set; }
+        public IReadOnlyList<string> ChangedFiles { get; set; } = [];
+        public string? LastAgentMessage { get; set; }
+        public string? LastError { get; set; }
+    }
 }

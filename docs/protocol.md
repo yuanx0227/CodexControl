@@ -1,12 +1,12 @@
 # Codex Control Relay Protocol v2
 
-状态：v2 电脑确认配对、权限档位与 Device Ready Gate 实现基线。
+状态：v2 电脑确认配对、权限档位、Device Ready Gate 与可选 `sharedSessionV1` 共享会话能力实现基线。
 
 ## 1. 协议分层
 
 Codex Control 有两套互不混用的协议：
 
-1. **Codex App Server JSON-RPC**：只存在于 Agent 与本地 app-server/TUI 之间，字段以执行中的 Codex CLI Schema 为准。
+1. **Codex App Server JSON-RPC**：用于本地 app-server 与 Agent/TUI/共享模式官方 Desktop 的连接，字段以执行中的 Codex CLI Schema 为准；不穿透至 Relay/PWA。
 2. **Codex Control Relay Protocol**：Device、Relay、Controller/PWA 之间的稳定 Domain Protocol，不暴露 Codex 原始 JSON-RPC。
 
 Relay Protocol 版本为整数 `2`。v1 Claim 即授权入口不再兼容。
@@ -818,3 +818,34 @@ INTERNAL_ERROR
 - Agent log Redaction 与协议正文抑制。
 
 生产部署仍需补充真实弱网乱序、大量并发连接、正式证书/域名、Android/iOS 实机后台挂起和渗透测试。
+
+## 22. 共享会话能力 sharedSessionV1
+
+v2 中可选能力，只有 snapshot 同时声明 `sharedSession:true` 与 `capabilities:["sharedSessionV1"]` 时启用。未知能力不能显示为已共享，旧 stdio 模式保留其接口。
+
+| 请求 | Payload | Relay 权限 / 行为 |
+| --- | --- | --- |
+| `control.thread.watch` | `threadId, streamEpoch?, afterSequence?` | view；Relay 将内部 `allowJoin` 强制改写为当前 Pairing 的 steer 权限，忽略客户端伪造值 |
+| `control.thread.unwatch` | `threadId` | view；取消网页观察登记，不停止服务/Turn、不卸载 Desktop 所用 Thread |
+| `control.thread.send` | `threadId, text, expectedTurnId?` | steer；有 expectedTurnId 时对该活动 Turn steer，缺省只允许闲置启动；不覆盖模型、cwd、审批或 sandbox |
+
+首次加入上游订阅需要 steer；已由本 Agent 运行期在同一已验证服务观察的 Thread 可由 view-only 控制器读取，并在新连接代次恢复，cwd约束保持；不同实例/新Thread不继承。通过 `RemoteControlDispatcher.SharedSessions` 调用公开 `thread/read`、无覆盖 `thread/resume` 和有限摘要读取，不将原始 Thread 穿透至 Relay/Web。
+
+Snapshot 增加 `serviceInstanceId, streamEpoch, lastSequence, sharedSession, connectionState, capabilities, threads`。每个 Thread 包含 `threadState, activeTurnId?, lastTurnId?, lastTurnStatus?, activity, waitingOnApproval, waitingOnUserInput, freshness`。连接丢失不推导 Turn 结束；active 且 Turn ID 未知仍显示运行、待同步。
+
+领域事件增加 `serviceInstanceId, streamEpoch, sequence`。sequence 在当前 Agent 上游连接代次内按整个 Device 单调增长，和 snapshot.revision 独立。Thread 间序号不连续是正常情况，不能按某一个 Thread 缺少相邻数字推导丢事件；客户端检查 Device 流缺口。上游连接改变重置 epoch，不代表执行服务换实例。新增命令输出、计划、公开推理摘要、设置变化、不支持内容/无归属恢复信号；不向焦点 Thread 猜配未知事件。
+
+事件真实 UTF-8 envelope 上限900KiB；超限时在入环前替换为同一 Thread/Turn/Item 的 `ContentIncomplete`（`truncated:true,resyncRequired:true,reason:"EVENT_TOO_LARGE",originalKind`），不转发原正文/图片、不使Relay连接因超帧关闭。网页保留已有内容并显示缺失；快照恢复也超过预算时明确失败。
+
+Watch result 为 `threadId, serviceInstanceId, streamEpoch, sequence, history, snapshot, approvals, events, resyncRequired, controlAllowed, policyReason?`：
+
+- 游标仍在内存环中：`resyncRequired:false`、history 是空占位，必须保留原消息并重放 events。sequence 是请求起点，不能提前推进后丢弃补发事件。
+- 首次/缺口/epoch 改变：`resyncRequired:true`，返回一次历史视图与读取期间事件。sequence 在加入/读取前捕获，网页缓冲期间新事件后统一按序归并；正常完成不会重读历史。
+- 内存环上限 32MiB、10000事件、5分钟，无正文落盘。Watch 成功 payload 的真实 UTF-8 JSON 不超过 256KiB；超大重放尝试当前快照，仍过大返回 `WATCH_RESPONSE_TOO_LARGE`，保留旧内容并显示未同步。此版本不提供跨帧完整历史分页恢复，不能把失败当作完成同步。
+- History entry 的 `truncated, originalLength` 明确单条完整性；正文上限128000字符，保留原空白。网页不以截断历史覆盖已经收到的更长完整正文。活动正文快照没有可比较的 delta offset 时显示正在同步，等待完整 item，避免猜测拼接后重影。
+
+审批新增 `ApprovalResolving` 与 pending 的 `isResolving`。发送人工决定后进入 resolving，只有 `ApprovalResolved` 或对应服务生命周期终结才能撤卡；Desktop 先决议时网页服从服务端结果。控制 RPC Accepted 不等于 Turn 已 interrupted，必须等待目标终态。
+
+所有修改请求仍要求 requestId；相同 ID 不同 payload 拒绝 `REQUEST_ID_CONFLICT`。共享修改操作在 Agent 写入无正文提交标识；结果丢失或进程重启时返回 `CONTROL_OUTCOME_UNKNOWN` 且不自动重发。停止/明确 cancel/decline 使用目标绑定及内存去重，在持久化不可用时仍可限制执行。慢速观察请求由有界普通队列执行，停止/拒绝有独立处理队列；满队列返回 `CONTROL_BUSY` 且未执行。
+
+Relay 持久化 snapshot 去除 `lastAgentMessage, runningCommand, currentActivity, changedFiles, lastError` 以及各 activeTurn 对应字段。实时转发不脱掉这些已获 view 授权的内容；设备列表中的持久化摘要不能覆盖同 epoch/revision 的实时正文。

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>CodexControlSharedSessionProbe</AssemblyName>
+    <RootNamespace>CodexControl.SharedSessionProbe</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/agent/Codex/ThreadWorkspacePolicy.cs" Link="ThreadWorkspacePolicy.cs" />
+  </ItemGroup>
+</Project>

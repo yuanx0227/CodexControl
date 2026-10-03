@@ -39,9 +39,10 @@ docs/        Architecture, protocol, security, development, acceptance evidence
 - Device private key is DPAPI protected; Controller private key is a non-exportable IndexedDB CryptoKey.
 - Pairing Code is one-time, 180-second TTL, five invalid proof attempts, and HMAC-only in SQLite.
 - All remote Control checks current Pairing Permission.
-- Session history and session options require `view`; Thread create/resume requires `steer`, an existing absolute cwd, and no active Turn on that same Thread. Different Threads may run concurrently.
+- Session history and session options require `view`; Thread create/resume-and-start requires `steer`, an existing absolute cwd, and no active Turn on that same Thread. Shared watch may join an active Thread without overriding its settings; initial upstream join additionally requires `steer`. Different Threads may run concurrently.
 - Remote Thread create/resume must stay behind `RemoteControlDispatcher`; Web and Relay never parse raw app-server Thread objects.
 - Remote-created/resumed work enforces `workspace-write`; model comes from normalized `model/list`, and approval policy is one of `untrusted`, `on-request`, or `never` with `untrusted` as the default.
+- Shared input inherits the effective model/permissions without overrides. Its cwd must be within locally authorized `SharedProjectRoots`; only the exact current Thread visualization root is an automatic auxiliary scope. Standard temporary directory policy requires separate local opt-in after checking the service environment.
 - Approval is explicit first-valid-response-wins; never auto-approve.
 - Relay does not persist full Prompt, Agent Response, Shell Output, Diff, source code, or raw JSON-RPC history.
 - PWA parses only Codex Control Domain Events, never raw app-server messages.

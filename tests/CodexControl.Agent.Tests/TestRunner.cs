@@ -33,14 +33,24 @@ internal static class TestRunner
         var allTests = new (string Name, Func<Task> Execute)[]
         {
             ("JsonRpcProtocol", TestJsonRpcProtocolAsync),
+            ("SharedSession_Storage", SharedSessionStorageTests.RunAsync),
+            ("RealSharedSession_Product", SharedSessionRealTests.RunAsync),
             ("AgentOptions_SecureRelay", TestAgentOptionsAsync),
             ("AgentSettings_AtomicRecovery", TestAgentSettingsAsync),
             ("ThreadHistory_Markdown_Image_Timing_Summary", TestRichThreadHistoryAsync),
             ("CodexStateManager", TestCodexStateManagerAsync),
             ("SessionSync_Status_UserMessage", TestSessionSyncAsync),
+            ("SharedSession_State", SharedSessionStateTests.StateAsync),
+            ("SharedSession_Approval", SharedSessionStateTests.ApprovalAsync),
+            ("SharedSession_Normalizer", SharedSessionStateTests.NormalizerAsync),
+            ("SharedSession_Dispatch", SharedSessionTransportSafetyTests.DispatchAsync),
+            ("SharedSession_WatchBudget", SharedSessionTransportSafetyTests.BudgetAsync),
             ("CodexDesktopRuntimeResolver", TestCodexDesktopRuntimeResolverAsync),
             ("CodexExecutableProbe", TestCodexExecutableProbeAsync),
             ("AppServerBridge_LocalWsProxy", TestBridgeAndProxyAsync),
+            ("SharedTransport_IndependentConnections", SharedTransportTests.RunAsync),
+            ("SharedSession_PolicyAuthorization", SharedSessionPolicyTests.RunAsync),
+            ("SharedSession_RuntimeReconnect", SharedSessionRuntimeTests.RunAsync),
             ("AgentRuntimeCoordinator_Lifecycle", TestRuntimeCoordinatorAsync),
             ("RemoteControl_ApprovalArbitration", TestRemoteControlAndApprovalAsync),
             ("AgentRelay_DPAPI_Authentication_Pairing", TestAgentRelayAsync),
@@ -388,12 +398,12 @@ internal static class TestRunner
         Assert(state.Snapshot.ActiveTurnId == "turn-1", "turn id should be captured");
 
         Apply(state, """
-            {"method":"item/started","params":{"item":{"type":"commandExecution","command":"dotnet test"}}}
+            {"method":"item/started","params":{"threadId":"thr-1","turnId":"turn-1","item":{"type":"commandExecution","command":"dotnet test"}}}
             """);
         Assert(state.Snapshot.Status == CodexActivityStatus.RunningTests, "test command should enter RunningTests");
 
         Apply(state, """
-            {"method":"item/commandExecution/requestApproval","id":"approval\u002D1","params":{}}
+            {"method":"item/commandExecution/requestApproval","id":"approval\u002D1","params":{"threadId":"thr-1","turnId":"turn-1"}}
             """);
         Assert(state.Snapshot.Status == CodexActivityStatus.WaitingApproval, "approval should block the state");
         Assert(state.Snapshot.PendingApprovalCount == 1, "approval count should increment");
@@ -1517,5 +1527,5 @@ internal static class TestRunner
         throw new InvalidOperationException(message);
     }
 
-    private sealed class SkipTestException(string message) : Exception(message);
+    internal sealed class SkipTestException(string message) : Exception(message);
 }

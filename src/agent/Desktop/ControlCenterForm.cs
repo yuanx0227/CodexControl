@@ -92,6 +92,15 @@ internal sealed partial class ControlCenterForm : Form
         Width = 640,
     };
     private readonly ModernTextBox _codexPath = TextInput(620, "codex.exe 的绝对路径");
+    private readonly ModernTextBox _sharedEndpoint = TextInput(620, "留空为独立模式；共享模式填写 ws://127.0.0.1:9023");
+    private readonly ModernTextBox _sharedManifest = TextInput(620, "共享服务身份文件的绝对路径");
+    private readonly ModernTextBox _sharedProjects = TextInput(620, "多个绝对项目目录用分号分隔；留空禁止远程发送/新建");
+    private readonly ToggleSwitch _sharedStandardTemp = new()
+    {
+        Text = "额外授权 Desktop 标准临时目录",
+        Description = "仅在已核实共享服务未自定义 TMPDIR 时启用；默认关闭",
+        Width = 640,
+    };
     private readonly ToggleSwitch _fixedPort = new()
     {
         Text = "使用固定本地端口",
@@ -210,14 +219,14 @@ internal sealed partial class ControlCenterForm : Form
         _relayStatus.SetStatus(RelayStatusText(snapshot.RelayStatus), RelayStatusTone(snapshot.RelayStatus));
         _relayDetail.Text = RelayDescription(_settings);
 
-        var proxyText = snapshot.LocalProxyUri is null
+        var proxyText = snapshot.IsSharedSession ? "共享服务" : snapshot.LocalProxyUri is null
             ? "未就绪"
             : snapshot.LocalTuiConnected ? "终端已连接" : "等待终端";
         var proxyTone = snapshot.LocalProxyUri is null
             ? StatusTone.Neutral
             : snapshot.LocalTuiConnected ? StatusTone.Success : StatusTone.Info;
         _proxyStatus.SetStatus(proxyText, proxyTone);
-        _proxyDetail.Text = snapshot.LocalProxyUri is null
+        _proxyDetail.Text = snapshot.IsSharedSession ? "官方 Desktop 独立连接同一服务" : snapshot.LocalProxyUri is null
             ? string.Empty
             : snapshot.LocalProxyUri.ToString();
 
@@ -227,7 +236,7 @@ internal sealed partial class ControlCenterForm : Form
         _summaryEmblem.Tone = overallTone;
         _error.Text = snapshot.LastError ?? string.Empty;
         _errorCard.Visible = !string.IsNullOrWhiteSpace(snapshot.LastError);
-        _terminalButton.Enabled = snapshot.CoreStatus == RuntimeCoreStatus.Ready && !snapshot.LocalTuiConnected;
+        _terminalButton.Enabled = !snapshot.IsSharedSession && snapshot.CoreStatus == RuntimeCoreStatus.Ready && !snapshot.LocalTuiConnected;
         _terminalButton.Text = snapshot.LocalTuiConnected ? "终端已连接" : "打开 Codex 终端";
         _pauseButton.Text = _settings.RemoteAccessPaused ? "恢复远程访问" : "暂停远程访问";
     }
@@ -309,6 +318,10 @@ internal sealed partial class ControlCenterForm : Form
             CodexPath = _manualCodex.Checked ? _codexPath.Text : null,
             LocalPortMode = _fixedPort.Checked ? LocalPortMode.Fixed : LocalPortMode.Auto,
             FixedPort = _fixedPort.Checked ? decimal.ToInt32(_port.Value) : null,
+            SharedEndpoint = _sharedEndpoint.Text,
+            SharedManifestPath = _sharedManifest.Text,
+            SharedProjectRoots = _sharedProjects.Text.Split([';', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            SharedAllowStandardTemporaryDirectories = _sharedStandardTemp.Checked,
         };
         await ExecuteAsync(async () =>
         {
@@ -329,6 +342,10 @@ internal sealed partial class ControlCenterForm : Form
         _runAtLogin.Checked = settings.RunAtLogin;
         _manualCodex.Checked = settings.CodexPathMode == CodexPathMode.Manual;
         _codexPath.Text = settings.CodexPath ?? string.Empty;
+        _sharedEndpoint.Text = settings.SharedEndpoint ?? string.Empty;
+        _sharedManifest.Text = settings.SharedManifestPath ?? string.Empty;
+        _sharedProjects.Text = string.Join("; ", settings.SharedProjectRoots);
+        _sharedStandardTemp.Checked = settings.SharedAllowStandardTemporaryDirectories;
         _fixedPort.Checked = settings.LocalPortMode == LocalPortMode.Fixed;
         _port.Value = settings.FixedPort is >= 1 and <= 65535 ? settings.FixedPort.Value : 8765;
         UpdateAdvancedInputState();

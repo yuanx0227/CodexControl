@@ -72,4 +72,4 @@ docker compose -f '.\deploy\docker-compose.yml' up -d --build
 
 安装升级不会自动切换到共享模式。切换 Desktop 启动方式前需正常退出其窗口和托盘；运行步骤、回退方式、已测版本与剩余验收项见[实施记录](docs/shared-session-implementation.md)。
 
-[开发与本地运行](docs/development.md) · [架构](docs/architecture.md) · [安全配置](docs/security.md) · [变更日志](CHANGELOG.md)
+[开发与本地运行](docs/development.md) · [架构](docs/architecture.md) · [远程控制研究](docs/remote-control-research.md) · [安全配置](docs/security.md) · [变更日志](CHANGELOG.md)

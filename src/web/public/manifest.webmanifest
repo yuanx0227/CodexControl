@@ -4,8 +4,8 @@
   "description": "Observe and control managed Codex sessions",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0b1020",
-  "theme_color": "#0b1020",
+  "background_color": "#0d0e12",
+  "theme_color": "#0d0e12",
   "icons": [
     {
       "src": "/icon-192.svg",

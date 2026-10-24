@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Redesigned the PWA: light/dark/system themes with design tokens, SVG icons and brand mark, session search, project thread counts and relative times, task suggestions and project shortcuts for new tasks, and an auto-growing composer that ignores Enter during IME composition.
+- Pending approvals are pinned above the composer so they cannot scroll out of view; unpairing now asks for confirmation.
+- The new-task view no longer shows live events from other sessions.
+- Added `docs/remote-control-research.md`: root cause of the Desktop/web split, Codex 0.164 daemon and Remote Control findings, and the recommended single-runtime architecture.
+
 ## 0.7.0 - 2026-08-24
 
 - Added live model selection from app-server `model/list` and explicit `untrusted` / `on-request` / `never` approval policy selection while retaining `workspace-write`.

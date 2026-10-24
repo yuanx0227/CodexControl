@@ -16,8 +16,10 @@ import type {
   CodexThreadSummary,
   DeviceSummary,
 } from './protocol';
+import { BrandMark, Icon, type IconName } from './icons';
 import { RelayClient, type RelayClientState } from './relayClient';
 import { loadRelayUrl, saveRelayUrl } from './storage';
+import { themeLabels, useThemePreference, type ThemePreference } from './theme';
 import type { ThreadView } from './threadStore';
 
 const initialState: RelayClientState = {
@@ -40,6 +42,7 @@ export function App() {
   const [showPairing, setShowPairing] = useState(false);
   const [toast, setToast] = useState<string>();
   const toastTimer = useRef<number | undefined>(undefined);
+  const theme = useThemePreference();
 
   const showToast = useCallback((message: string) => {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
@@ -96,14 +99,22 @@ export function App() {
         }}
         onNotify={showToast}
         toast={toast}
+        theme={theme.preference}
+        onCycleTheme={theme.cycle}
       />
     );
   }
 
   const needsPairing = Boolean(pairingLink) || showPairing || state.devices.length === 0;
+  const onlineCount = state.devices.filter((device) => device.online).length;
   return (
     <main className="landing-shell">
-      <LandingHeader connection={state.connection} relayVersion={state.relayVersion} />
+      <LandingHeader
+        connection={state.connection}
+        relayVersion={state.relayVersion}
+        theme={theme.preference}
+        onCycleTheme={theme.cycle}
+      />
       {needsPairing ? (
         <PairingPanel
           connection={state.connection}
@@ -129,11 +140,13 @@ export function App() {
         <section className="device-home" aria-label="设备列表">
           <div className="device-home-heading">
             <div>
-              <p className="overline">Codex Control</p>
+              <p className="overline">已配对 {state.devices.length} 台 · 在线 {onlineCount} 台</p>
               <h1>开发电脑</h1>
               <p>选择一台电脑，继续历史会话或开始新任务。</p>
             </div>
-            <button className="quiet-button" onClick={() => setShowPairing(true)}>添加电脑</button>
+            <button className="quiet-button with-icon" onClick={() => setShowPairing(true)}>
+              <Icon name="plus" size={16} />添加电脑
+            </button>
           </div>
           <div className="device-list">
             {state.devices.map((device) => (
@@ -147,26 +160,47 @@ export function App() {
               />
             ))}
           </div>
-          {toast && <div key={toast} className="toast">{toast}</div>}
+            {toast && <div key={toast} className="toast" role="status"><Icon name="check" size={15} />{toast}</div>}
         </section>
       )}
     </main>
   );
 }
 
+const taskSuggestions: { icon: IconName; title: string; prompt: string }[] = [
+  { icon: 'terminal', title: '修复失败的测试', prompt: '运行项目测试，找出失败原因并修复，完成后总结改动。' },
+  { icon: 'search', title: '梳理项目结构', prompt: '阅读这个项目，说明主要模块、入口和数据流，不要修改文件。' },
+  { icon: 'file', title: '审查最近的改动', prompt: '审查当前未提交的改动，指出潜在缺陷和可以简化的地方。' },
+];
+
+function SidebarSkeleton() {
+  return (
+    <div className="sidebar-skeleton" role="status" aria-label="正在读取历史">
+      {[72, 56, 64, 48, 60].map((width, index) => <span key={index} className={`skeleton-line w${width}`} />)}
+    </div>
+  );
+}
+
 function LandingHeader({
   connection,
   relayVersion,
+  theme,
+  onCycleTheme,
 }: {
   connection: RelayClientState['connection'];
   relayVersion?: string;
+  theme: ThemePreference;
+  onCycleTheme: () => void;
 }) {
   return (
     <header className="landing-header">
       <Brand />
-      <div className="landing-meta">
-        <ConnectionState connection={connection} />
-        <small>Web v{packageJson.version} · Relay v{relayVersion ?? '未知'} · Protocol v2</small>
+      <div className="landing-actions">
+        <div className="landing-meta">
+          <ConnectionState connection={connection} />
+          <small>Web v{packageJson.version} · Relay v{relayVersion ?? '未知'} · Protocol v2</small>
+        </div>
+        <ThemeButton theme={theme} onCycle={onCycleTheme} />
       </div>
     </header>
   );
@@ -175,9 +209,27 @@ function LandingHeader({
 function Brand() {
   return (
     <div className="brand">
-      <span className="brand-glyph">C</span>
+      <BrandMark size={30} />
       <strong>Codex Control</strong>
     </div>
+  );
+}
+
+function ThemeButton({ theme, onCycle, withLabel = false }: {
+  theme: ThemePreference;
+  onCycle: () => void;
+  withLabel?: boolean;
+}) {
+  const icon: IconName = theme === 'light' ? 'sun' : theme === 'dark' ? 'moon' : 'contrast';
+  const label = `外观：${themeLabels[theme]}`;
+  return withLabel ? (
+    <button className="sidebar-action" onClick={onCycle} title="切换浅色 / 深色 / 跟随系统">
+      <Icon name={icon} size={16} />{label}
+    </button>
+  ) : (
+    <button className="icon-button" onClick={onCycle} aria-label={label} title={label}>
+      <Icon name={icon} />
+    </button>
   );
 }
 
@@ -233,19 +285,26 @@ function PairingPanel({
   return (
     <section className="pairing-view">
       <div className="pairing-panel">
-        <span className="pairing-icon">↔</span>
+        <span className="pairing-icon"><Icon name="link" size={24} /></span>
         <h1>连接你的电脑</h1>
+        <p className="pairing-lede">扫描电脑上 Codex Control Agent 显示的二维码，或输入三分钟内有效的六位码。</p>
+        <ol className="pairing-steps" aria-label="配对步骤">
+          <li><span>1</span>在电脑 Agent 中点击“生成配对码”</li>
+          <li><span>2</span>扫码，或在下方输入六位码</li>
+          <li><span>3</span>回到电脑确认“完整控制”或“仅查看”</li>
+        </ol>
         {pairingLink && (
           <section className="pairing-link-summary">
-            <p>将连接 Relay：<strong>{new URL(pairingLink.relayRoot).host}</strong></p>
-            <p>电脑：<strong>{pairingLink.deviceName ?? '二维码中的电脑'}</strong></p>
+            <dl>
+              <div><dt>Relay</dt><dd>{new URL(pairingLink.relayRoot).host}</dd></div>
+              <div><dt>电脑</dt><dd>{pairingLink.deviceName ?? '二维码中的电脑'}</dd></div>
+            </dl>
             <button className="solid-button full-button" onClick={() => onConfirmLink(pairingLink)}>
               确认 Relay 并继续
             </button>
           </section>
         )}
-        <p>扫描电脑设置页二维码，或输入三分钟内有效的六位码。</p>
-        {!pairingLink && <form onSubmit={submit}>
+        {!pairingLink && <form className="pairing-form" onSubmit={submit}>
           <label htmlFor="pairing-code">六位配对码</label>
           <input
             id="pairing-code"
@@ -270,7 +329,7 @@ function PairingPanel({
           </button>
         </form>}
         <details className="relay-settings">
-          <summary>Relay 设置</summary>
+          <summary>Relay 服务器设置</summary>
           <label htmlFor="relay-url">WebSocket 地址</label>
           <div className="settings-row">
             <input id="relay-url" value={relayUrl} onChange={(event) => setRelayUrl(event.target.value)} />
@@ -298,8 +357,8 @@ function DeviceRow({ device, onOpen }: { device: DeviceSummary; onOpen: () => vo
   const runningCount = activeTurnsForSnapshot(device.snapshot).length;
   const managedRunning = runningCount > 0;
   return (
-    <button className="device-row" onClick={onOpen} aria-label={`打开 ${device.name}`}>
-      <span className="device-avatar">{device.name.slice(0, 1).toUpperCase()}</span>
+    <button className={`device-row ${device.online ? 'online' : 'offline'}`} onClick={onOpen} aria-label={`打开 ${device.name}`}>
+      <span className="device-avatar"><Icon name="monitor" size={20} /><i /></span>
       <span className="device-copy">
         <strong>{device.name}</strong>
         <small>{device.online
@@ -315,7 +374,7 @@ function DeviceRow({ device, onOpen }: { device: DeviceSummary; onOpen: () => vo
         status={managedRunning ? device.snapshot?.status : 'Idle'}
         label={managedRunning ? `Agent 运行中${runningCount > 1 ? ` · ${runningCount}` : ''}` : device.online ? 'Agent 空闲' : undefined}
       />
-      <span className="row-chevron">›</span>
+      <span className="row-chevron"><Icon name="chevron-right" /></span>
     </button>
   );
 }
@@ -338,22 +397,24 @@ function ConversationLink({
   onClick: () => void;
 }) {
   const unread = Boolean(activity && activity.latestAt > (readAt ?? 0));
+  const time = formatRelativeTime(thread.recencyAt ?? thread.updatedAt ?? thread.createdAt);
   return (
     <button
       className={`conversation-link ${className} ${active ? 'active' : ''}`}
       title={title}
+      aria-current={active ? 'page' : undefined}
       onClick={onClick}
     >
       <span className="conversation-link-title">{thread.name ?? thread.preview ?? '未命名会话'}</span>
       {activity?.status === 'running' ? (
         <span className="thread-indicator running" title="任务运行中" aria-label="任务运行中" />
       ) : unread && activity?.status === 'completed' ? (
-        <span className="thread-indicator completed-unread" title="任务已完成，尚未阅读" aria-label="完成未读">✓</span>
+        <span className="thread-indicator completed-unread" title="任务已完成，尚未阅读" aria-label="完成未读"><Icon name="check" size={10} /></span>
       ) : unread && activity?.status === 'failed' ? (
         <span className="thread-indicator failed-unread" title="任务失败，尚未阅读" aria-label="失败未读">!</span>
       ) : unread ? (
         <span className="thread-indicator unread" title="有未读更新" aria-label="未读更新" />
-      ) : null}
+      ) : time ? <small className="conversation-link-time">{time}</small> : null}
     </button>
   );
 }
@@ -414,6 +475,8 @@ function DeviceWorkspace({
   onRevoke,
   onNotify,
   toast,
+  theme,
+  onCycleTheme,
 }: {
   client: RelayClient;
   device: DeviceSummary;
@@ -429,8 +492,11 @@ function DeviceWorkspace({
   onRevoke: () => Promise<void>;
   onNotify: (message: string) => void;
   toast?: string;
+  theme: ThemePreference;
+  onCycleTheme: () => void;
 }) {
   const [threads, setThreads] = useState<CodexThreadSummary[]>([]);
+  const [threadQuery, setThreadQuery] = useState('');
   const [projects, setProjects] = useState<CodexProjectSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [legacyThreadHistory, setThreadHistory] = useState<CodexThreadReadResult>();
@@ -468,6 +534,7 @@ function DeviceWorkspace({
   const [isAtBottom, setIsAtBottom] = useState(true);
   const threadHistoryRequest = useRef(0);
   const chatFeed = useRef<HTMLElement>(null);
+  const composerInput = useRef<HTMLTextAreaElement>(null);
   const stickChatToBottom = useRef(true);
   const initialScrollThread = useRef<string | undefined>(undefined);
   const previousTailSignature = useRef<string | undefined>(undefined);
@@ -627,6 +694,14 @@ function DeviceWorkspace({
     saveSessionPreference(device.deviceId, { model: selectedModel, approvalPolicy });
   }, [approvalPolicy, device.deviceId, selectedModel]);
 
+  useLayoutEffect(() => {
+    // Grow the composer with its content up to the CSS max-height, then scroll inside it.
+    const input = composerInput.current;
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = `${input.scrollHeight}px`;
+  }, [composer]);
+
   useEffect(() => {
     if (newSession || selectedThreadId || threads.length === 0) return;
     setSelectedThreadId(threads[0].threadId);
@@ -708,6 +783,12 @@ function DeviceWorkspace({
   useEffect(() => saveThreadReadReceipts(device.deviceId, readReceipts), [device.deviceId, readReceipts]);
 
   const navigation = useMemo(() => buildThreadNavigation(threads, projects), [projects, threads]);
+  const normalizedThreadQuery = threadQuery.trim().toLocaleLowerCase();
+  const visibleNavigation = useMemo(
+    () => filterThreadNavigation(navigation, normalizedThreadQuery),
+    [navigation, normalizedThreadQuery],
+  );
+  const projectShortcuts = navigation.projects.filter((group) => group.cwd).slice(0, 4);
   const selectedThread = threads.find((thread) => thread.threadId === selectedThreadId);
 
   useEffect(() => {
@@ -757,12 +838,12 @@ function DeviceWorkspace({
     return () => window.clearInterval(timer);
   }, [taskRunning, runningStartedAt]);
   const eventEntries = useMemo(
-    () => buildChatEntries(
+    () => newSession ? [] : buildChatEntries(
       events,
       conversationSnapshot,
       conversationId,
     ),
-    [conversationId, conversationSnapshot, events],
+    [conversationId, conversationSnapshot, events, newSession],
   );
   const historicalEntries = useMemo<ChatEntry[]>(() => {
     if (!threadHistory) return [];
@@ -1068,43 +1149,69 @@ function DeviceWorkspace({
     <div className={`workspace-shell ${sidebarOpen ? 'sidebar-is-open' : ''}`}>
       <aside className="conversation-sidebar">
         <div className="sidebar-top">
-          <button className="icon-button mobile-close" aria-label="关闭会话栏" onClick={() => setSidebarOpen(false)}>×</button>
-          <button className="sidebar-back" onClick={onBack}>‹ 所有电脑</button>
+          <button className="sidebar-back" onClick={onBack} title="返回电脑列表">
+            <Icon name="chevron-left" size={16} />所有电脑
+          </button>
+          <button className="icon-button mobile-close" aria-label="关闭会话栏" onClick={() => setSidebarOpen(false)}>
+            <Icon name="x" />
+          </button>
         </div>
         <button
           className="new-chat-button"
           title="新建任务"
           onClick={() => beginNewSession()}
         >
-          <span>＋</span> 新建任务
+          <span className="new-chat-icon"><Icon name="plus" size={16} /></span>新建任务
         </button>
+        <label className="thread-search">
+          <Icon name="search" size={15} />
+          <span className="sr-only">搜索会话</span>
+          <input
+            type="search"
+            placeholder="搜索会话或项目"
+            value={threadQuery}
+            onChange={(event) => setThreadQuery(event.target.value)}
+          />
+        </label>
         <div className="sidebar-label">
           <span>项目</span>
-          <button className="icon-button" aria-label="刷新历史" disabled={historyLoading} onClick={() => void refreshThreads()}>↻</button>
+          <button className="icon-button small" aria-label="刷新历史" title="刷新历史" disabled={historyLoading} onClick={() => void refreshThreads()}>
+            <Icon name="refresh" size={15} className={historyLoading ? 'spin' : undefined} />
+          </button>
         </div>
         <nav className="conversation-nav" aria-label="历史会话">
-          {historyLoading ? <p className="sidebar-empty">正在读取历史…</p> : !device.online ? (
+          {historyLoading ? <SidebarSkeleton /> : !device.online ? (
             <p className="sidebar-empty">电脑 Agent 离线，恢复后自动加载</p>
           ) : threads.length === 0 && projects.length === 0 ? (
             <p className="sidebar-empty">暂无历史会话</p>
+          ) : normalizedThreadQuery && visibleNavigation.projects.length === 0 && visibleNavigation.recent.length === 0 ? (
+            <p className="sidebar-empty">没有匹配“{threadQuery.trim()}”的会话</p>
           ) : (
             <>
-              {navigation.projects.map((group, index) => {
-                const expanded = expandedProjects.has(group.key);
+              {visibleNavigation.projects.map((group, index) => {
+                const expanded = Boolean(normalizedThreadQuery) || expandedProjects.has(group.key);
                 const regionId = `project-threads-${index}`;
+                const runningInProject = group.threads.filter((thread) => activeTurnByThread.has(thread.threadId) ||
+                  (shared && threadViews[thread.threadId]?.state.threadState === 'active')).length;
                 return (
-                  <section className="project-group" key={group.key}>
+                  <section className={`project-group ${expanded ? 'expanded' : ''}`} key={group.key}>
                     <div className="project-heading">
                       <button
                         className="project-toggle"
                         aria-expanded={expanded}
                         aria-controls={regionId}
                         aria-label={`项目 ${group.name}`}
+                        title={group.cwd}
                         onClick={() => toggleProject(group.key)}
                       >
-                        <span className={`project-chevron ${expanded ? 'expanded' : ''}`}>›</span>
-                        <span className="project-folder" aria-hidden="true" />
+                        <span className={`project-chevron ${expanded ? 'expanded' : ''}`}><Icon name="chevron-right" size={14} /></span>
+                        <span className="project-folder"><Icon name="folder" size={16} /></span>
                         <span className="project-copy"><strong>{group.name}</strong></span>
+                        {runningInProject > 0 ? (
+                          <span className="project-count running" aria-hidden="true">{runningInProject}</span>
+                        ) : group.threads.length > 0 && (
+                          <span className="project-count" aria-hidden="true">{group.threads.length}</span>
+                        )}
                       </button>
                       {group.cwd && (
                         <button
@@ -1112,7 +1219,7 @@ function DeviceWorkspace({
                           aria-label={`在 ${group.name} 中新建会话`}
                           title={`在 ${group.name} 中新建会话`}
                           onClick={() => beginNewSession(group.cwd)}
-                        >＋</button>
+                        ><Icon name="plus" size={15} /></button>
                       )}
                     </div>
                     {expanded && group.threads.length > 0 && (
@@ -1134,10 +1241,10 @@ function DeviceWorkspace({
                   </section>
                 );
               })}
-              {navigation.recent.length > 0 && (
+              {visibleNavigation.recent.length > 0 && (
                 <div className="sidebar-label recent-label"><span>最近</span></div>
               )}
-              {navigation.recent.map((thread) => (
+              {visibleNavigation.recent.map((thread) => (
                 <ConversationLink
                   key={thread.threadId}
                   thread={thread}
@@ -1153,32 +1260,52 @@ function DeviceWorkspace({
           )}
         </nav>
         <div className="sidebar-footer">
-          <div className="sidebar-device">
-            <span className="device-avatar small">{device.name.slice(0, 1).toUpperCase()}</span>
+          <div className={`sidebar-device ${device.online ? 'online' : 'offline'}`}>
+            <span className="device-avatar small"><Icon name="monitor" size={16} /><i /></span>
             <span>
               <strong>{device.name}</strong>
               <small><ConnectionState connection={workspaceConnection} /></small>
-              <small className="version-line">Agent v{snapshot?.agentVersion ?? '未知'}</small>
             </span>
           </div>
           <div className="sidebar-version">
-            Web v{packageJson.version} · Relay v{relayVersion ?? '未知'} · Protocol v2
+            <span className="version-line">Agent v{snapshot?.agentVersion ?? '未知'}</span>
+            <span>Web v{packageJson.version} · Relay v{relayVersion ?? '未知'} · Protocol v2</span>
           </div>
-          <button className="sidebar-action" onClick={() => void refreshThreads()}>刷新会话</button>
-          <button className="sidebar-action danger" onClick={() => void onRevoke()}>解除配对</button>
+          <div className="sidebar-actions">
+            <button className="sidebar-action" onClick={() => void refreshThreads()}>
+              <Icon name="refresh" size={16} />刷新会话
+            </button>
+            <ThemeButton theme={theme} onCycle={onCycleTheme} withLabel />
+            <button
+              className="sidebar-action danger"
+              onClick={() => {
+                if (window.confirm(`解除与「${device.name}」的配对？之后需要在电脑上重新生成配对码。`)) void onRevoke();
+              }}
+            >
+              <Icon name="unlink" size={16} />解除配对
+            </button>
+          </div>
         </div>
       </aside>
       <button className="sidebar-backdrop" aria-label="关闭会话栏" onClick={() => setSidebarOpen(false)} />
 
       <main className="chat-main">
         <header className="chat-header">
-          <button className="icon-button menu-button" aria-label="打开会话栏" onClick={() => setSidebarOpen(true)}>☰</button>
+          <button className="icon-button menu-button" aria-label="打开会话栏" onClick={() => setSidebarOpen(true)}>
+            <Icon name="menu" />
+          </button>
           <div className="chat-title">
             <strong>{title}</strong>
-            <span>{newSession
-              ? newCwd.trim() || '选择电脑上的项目目录'
-              : `${selectedThread?.cwd ?? threadHistory?.cwd ?? selectedActiveTurn?.currentProject ?? device.name}` +
-                (shared ? ' · 与官方 Desktop 共享' : externalSession ? ' · Desktop 外部会话（状态不可订阅）' : '')}</span>
+            <span className="chat-subtitle">
+              <Icon name="folder" size={13} />
+              <span className="chat-path">{newSession
+                ? newCwd.trim() || '选择电脑上的项目目录'
+                : selectedThread?.cwd ?? threadHistory?.cwd ?? selectedActiveTurn?.currentProject ?? device.name}</span>
+              {!newSession && shared && <span className="mode-tag shared">与 Desktop 共享</span>}
+              {!newSession && externalSession && (
+                <span className="mode-tag" title="该会话由官方 Desktop 运行，网页无法订阅实时状态；发送消息后将由 Agent 接管">只读历史</span>
+              )}
+            </span>
           </div>
           <StatusPill
             online={device.online}
@@ -1197,6 +1324,8 @@ function DeviceWorkspace({
           />
           <button
             className="stop-button"
+            aria-label="停止当前任务"
+            title="停止当前任务"
             disabled={busy || !hasActiveTurn || sharedOffline}
             onClick={() => {
               if (!selectedActiveTurn) return;
@@ -1208,12 +1337,13 @@ function DeviceWorkspace({
                 .finally(() => setBusy(false));
             }}
           >
-            停止当前任务
+            <Icon name="stop" size={15} /><span>停止</span>
           </button>
         </header>
 
         {shared && (!sharedSupported || sharedOffline || sharedView?.needsRecovery || sharedView?.policyReason || sharedView?.error) && (
-          <div className="history-notice" role="status">
+          <div className="history-notice banner" role="status">
+            <Icon name="alert" size={15} />
             {!sharedSupported ? '当前 Agent 不支持共享会话协议，需要升级。'
               : sharedOffline ? '连接中断，任务状态待同步。重新连接后会自动恢复。'
               : sharedView?.error ?? sharedView?.policyReason ?? '正在恢复遗漏的会话更新…'}
@@ -1224,14 +1354,14 @@ function DeviceWorkspace({
         )}
 
         {(taskRunning || displayedActivity || displayedCommand) && (
-          <div className="runtime-strip">
+          <div className={`runtime-strip ${taskRunning ? 'running' : ''}`}>
             <span className="pulse-dot" />
-            <span>{taskRunning
+            <span className="runtime-activity">{taskRunning
               ? displayedActivity ?? '任务正在运行'
               : displayedActivity}</span>
-            {displayedCommand && <code>{displayedCommand}</code>}
+            {displayedCommand && <code><Icon name="terminal" size={13} />{displayedCommand}</code>}
             {runningElapsedMs !== undefined && (
-              <strong className="runtime-elapsed">已运行 {formatDuration(runningElapsedMs)}</strong>
+              <strong className="runtime-elapsed"><Icon name="clock" size={13} />已运行 {formatDuration(runningElapsedMs)}</strong>
             )}
           </div>
         )}
@@ -1293,15 +1423,31 @@ function DeviceWorkspace({
             </div>
           ) : newSession && chatEntries.length === 0 ? (
             <div className="empty-chat">
-              <span className="empty-mark">C</span>
+              <BrandMark size={52} className="empty-mark" />
               <h1>今天想让电脑上的 Codex 做什么？</h1>
-              <p>选择项目目录，在下方输入任务。任务会在电脑上真实执行。</p>
+              <p>选择项目目录，在下方输入任务。任务会在 {device.name} 上真实执行，重要操作仍需你审批。</p>
+              <div className="prompt-suggestions" aria-label="任务示例">
+                {taskSuggestions.map((suggestion) => (
+                  <button
+                    key={suggestion.title}
+                    type="button"
+                    className="prompt-suggestion"
+                    onClick={() => {
+                      setComposer(suggestion.prompt);
+                      composerInput.current?.focus();
+                    }}
+                  >
+                    <Icon name={suggestion.icon} size={16} />
+                    <span><strong>{suggestion.title}</strong><small>{suggestion.prompt}</small></span>
+                  </button>
+                ))}
+              </div>
             </div>
           ) : chatEntries.length === 0 ? (
             <div className="empty-chat compact">
-              <span className="empty-mark">C</span>
+              <BrandMark size={44} className="empty-mark" />
               <h1>{selectedThread?.name ?? threadHistory?.name ?? selectedThread?.preview ?? '准备就绪'}</h1>
-              <p>{shared ? '在下方输入消息，继续与 Desktop 共享的会话。' : '在下方输入消息，将恢复这个历史 Thread 并开始新的 Turn。'}</p>
+              <p>{shared ? '在下方输入消息，继续与 Desktop 共享的会话。' : '在下方输入消息，将恢复这个历史会话并开始新的一轮任务。'}</p>
             </div>
           ) : (
             <div className="message-column">
@@ -1312,20 +1458,6 @@ function DeviceWorkspace({
             </div>
           )}
 
-          {selectedApprovals.map((approval) => (
-            <ApprovalCard
-              key={approval.approvalId}
-              approval={approval}
-              disabled={busy || sharedOffline || Boolean(approval.isResolving)}
-              onDecision={(decision) => {
-                setBusy(true);
-                setError(undefined);
-                void onApprove(approval.approvalId, decision)
-                  .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
-                  .finally(() => setBusy(false));
-              }}
-            />
-          ))}
           {error && <p role="alert" className="chat-error">{error}</p>}
         </section>
 
@@ -1341,11 +1473,30 @@ function DeviceWorkspace({
               if (selectedThreadId) markThreadRead(selectedThreadId, selectedActivity?.latestAt);
             }}
           >
-            ↓ {newMessageCount} 条新消息
+            <Icon name="arrow-down" size={14} />{newMessageCount} 条新消息
           </button>
         )}
 
         <div className="composer-dock">
+          {selectedApprovals.length > 0 && (
+            // Pending approvals stay pinned above the composer so they cannot scroll out of reach.
+            <div className="approval-dock">
+              {selectedApprovals.map((approval) => (
+                <ApprovalCard
+                  key={approval.approvalId}
+                  approval={approval}
+                  disabled={busy || sharedOffline || Boolean(approval.isResolving)}
+                  onDecision={(decision) => {
+                    setBusy(true);
+                    setError(undefined);
+                    void onApprove(approval.approvalId, decision)
+                      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+                      .finally(() => setBusy(false));
+                  }}
+                />
+              ))}
+            </div>
+          )}
           {shared && acceptedSharedSteer && (
             <div className="shared-steer-feedback" role="status" aria-label="已接受的干预">
               <strong>干预已接受</strong>
@@ -1355,22 +1506,65 @@ function DeviceWorkspace({
           )}
           {!taskRunning && !selectedThread && (
             <div className="project-picker">
-              <span>⌂</span>
-              <label className="sr-only" htmlFor="new-session-cwd">电脑上的项目目录</label>
-              <input
-                id="new-session-cwd"
-                placeholder="D:\Projects\MES"
-                value={newCwd}
-                onChange={(event) => setNewCwd(event.target.value)}
-              />
+              <label className="project-path-field" htmlFor="new-session-cwd">
+                <Icon name="folder" size={15} />
+                <span className="sr-only">电脑上的项目目录</span>
+                <input
+                  id="new-session-cwd"
+                  placeholder="D:\Projects\MES"
+                  value={newCwd}
+                  spellCheck={false}
+                  onChange={(event) => setNewCwd(event.target.value)}
+                />
+              </label>
+              {projectShortcuts.length > 0 && (
+                <div className="project-shortcuts">
+                  {projectShortcuts.map((group) => (
+                    <button
+                      key={group.key}
+                      type="button"
+                      className={`project-shortcut ${normalizeProjectPath(newCwd) === normalizeProjectPath(group.cwd ?? '') ? 'selected' : ''}`}
+                      aria-label={`使用 ${group.name} 目录`}
+                      title={group.cwd}
+                      onClick={() => setNewCwd(group.cwd ?? '')}
+                    >
+                      {group.name}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
-          <form className="composer" onSubmit={submit}>
+          <form className={`composer ${hasActiveTurn ? 'steering' : ''}`} onSubmit={submit}>
+            {hasActiveTurn && (
+              <div className="composer-mode-banner">
+                <Icon name="sparkles" size={14} />
+                任务运行中，发送的内容会插入当前这一轮
+              </div>
+            )}
+            <label className="sr-only" htmlFor="chat-composer">{composerLabel}</label>
+            <textarea
+              id="chat-composer"
+              ref={composerInput}
+              aria-label={composerLabel}
+              placeholder={composerPlaceholder}
+              value={composer}
+              onChange={(event) => setComposer(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
+              }}
+              rows={1}
+            />
+            <div className="composer-footer">
             {shared && selectedThreadId && !newSession ? (
-              <div className="session-options">沿用当前会话的模型与权限设置</div>
+              <div className="session-options inherited"><Icon name="shield" size={14} />沿用当前会话的模型与权限设置</div>
             ) : <div className="session-options" aria-label="会话运行选项">
-              <label>
-                <span>模型</span>
+              <label className="option-pill">
+                <Icon name="cpu" size={14} />
+                <span className="sr-only">模型</span>
                 <select
                   aria-label="模型"
                   value={selectedModel}
@@ -1389,8 +1583,9 @@ function DeviceWorkspace({
                   ))}
                 </select>
               </label>
-              <label>
-                <span>批准等级</span>
+              <label className="option-pill">
+                <Icon name="shield" size={14} />
+                <span className="sr-only">批准等级</span>
                 <select
                   aria-label="批准等级"
                   value={approvalPolicy}
@@ -1406,39 +1601,23 @@ function DeviceWorkspace({
                 </select>
               </label>
             </div>}
-            <label className="sr-only" htmlFor="chat-composer">{composerLabel}</label>
-            <textarea
-              id="chat-composer"
-              aria-label={composerLabel}
-              placeholder={composerPlaceholder}
-              value={composer}
-              onChange={(event) => setComposer(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  event.currentTarget.form?.requestSubmit();
-                }
-              }}
-              rows={1}
-            />
-            <div className="composer-footer">
-              <span>{shared && selectedThreadId && !newSession ? hasActiveTurn ? '干预当前任务' : '共享会话'
-                : hasActiveTurn ? 'Steer 当前 Turn' : externalSession ? '恢复后切换为 Agent 托管' : selectedThread ? '恢复历史会话' : '创建新会话'}</span>
+              <span className="composer-mode">{shared && selectedThreadId && !newSession ? hasActiveTurn ? '插入当前任务' : '共享会话'
+                : hasActiveTurn ? '插入当前任务' : externalSession ? '发送后由 Agent 接管' : selectedThread ? '继续此会话' : '新建会话'}</span>
               <button
                 className="send-button"
                 aria-label={sendLabel}
-                title={sendLabel}
+                title={`${sendLabel}（Enter 发送，Shift+Enter 换行）`}
                 disabled={busy || !device.online || !composer.trim() || (!hasActiveTurn && !selectedThread && !newCwd.trim()) ||
                   (shared && !newSession && Boolean(selectedThreadId) && (!sharedSupported || sharedOffline || !sharedView?.controlAllowed ||
                     sharedView.needsRecovery || sharedView.syncing || taskRunning && !selectedActiveTurn?.turnId))}
               >
-                ↑
+                {busy ? <span className="send-spinner" aria-hidden="true" /> : <Icon name="arrow-up" size={18} />}
               </button>
             </div>
           </form>
-          <p className="composer-hint">Codex 会在你的电脑上运行。重要操作仍需审批。</p>
+          <p className="composer-hint">Codex 在你的电脑上运行 · 重要操作仍需审批</p>
         </div>
-        {toast && <div key={toast} className="toast">{toast}</div>}
+        {toast && <div key={toast} className="toast" role="status"><Icon name="check" size={15} />{toast}</div>}
       </main>
     </div>
   );
@@ -1450,7 +1629,9 @@ function ChatMessage({ entry }: { entry: ChatEntry }) {
     return (
       <details className="process-summary">
         <summary>
+          <Icon name="terminal" size={14} />
           <span>过程摘要</span>
+          <small className="process-count">{entry.processItems?.length ?? 0} 步</small>
           {impact && <small className="file-impact-total">{impact}</small>}
           {entry.durationMs !== undefined && <small>耗时 {formatDuration(entry.durationMs)}</small>}
         </summary>
@@ -1466,15 +1647,15 @@ function ChatMessage({ entry }: { entry: ChatEntry }) {
     );
   }
   if (entry.role === 'system') {
-    return <div className="system-message"><span>{entry.text}</span></div>;
+    return <div className="system-message"><span><Icon name="alert" size={13} />{entry.text}</span></div>;
   }
   if (entry.role === 'tool') {
-    return <div className="tool-message"><span>›_</span><div><strong>{entry.meta ?? '电脑操作'}</strong><p>{entry.text}</p></div></div>;
+    return <div className="tool-message"><Icon name="terminal" size={15} /><div><strong>{entry.meta ?? '电脑操作'}</strong><p>{entry.text}</p></div></div>;
   }
   const prompt = entry.role === 'user' ? splitUserPrompt(entry.text) : undefined;
   return (
     <article className={`chat-message ${entry.role} ${entry.streaming ? 'streaming' : ''}`}>
-      {entry.role === 'assistant' && <span className="assistant-avatar">C</span>}
+      {entry.role === 'assistant' && <BrandMark size={28} className="assistant-avatar" />}
       <div>
         {entry.meta && <small>{entry.meta}</small>}
         <MarkdownBody text={prompt?.request ?? entry.text} />
@@ -1552,11 +1733,17 @@ function ApprovalCard({
 }) {
   const decisions = approval.availableDecisions;
   return (
-    <section className="approval-message" aria-label="等待审批">
-      <div className="approval-heading"><span>!</span><div><strong>{approval.isResolving ? '审批已提交，等待确认' : '等待审批'}</strong><small>{approval.requestMethod}</small></div></div>
-      {approval.command && <pre>{approval.command}</pre>}
-      {approval.cwd && <p>目录：{approval.cwd}</p>}
-      {approval.reason && <p>{approval.reason}</p>}
+    <section className={`approval-message ${approval.isResolving ? 'resolving' : ''}`} aria-label="等待审批">
+      <div className="approval-heading">
+        <span className="approval-icon"><Icon name="shield" size={18} /></span>
+        <div>
+          <strong>{approval.isResolving ? '审批已提交，等待确认' : '等待审批'}</strong>
+          <small>{approvalKindLabel(approval.requestMethod)}</small>
+        </div>
+      </div>
+      {approval.reason && <p className="approval-reason">{approval.reason}</p>}
+      {approval.command && <pre><code>{approval.command}</code></pre>}
+      {approval.cwd && <p className="approval-cwd"><Icon name="folder" size={13} />{`目录：${approval.cwd}`}</p>}
       <div className="approval-actions">
         {decisions.map((decision) => (
           <button
@@ -1588,6 +1775,14 @@ function statusClass(status: string) {
 function decisionKind(decision: unknown) {
   const value = typeof decision === 'string' ? decision : Object.keys(decision as object)[0];
   return value?.startsWith('accept') || value?.startsWith('apply') ? 'allow' : 'deny';
+}
+
+function approvalKindLabel(method: string) {
+  if (/commandExecution|execCommand/iu.test(method)) return '运行命令';
+  if (/fileChange|applyPatch/iu.test(method)) return '修改文件';
+  if (/permissions/iu.test(method)) return '扩展权限';
+  if (/requestUserInput|elicitation/iu.test(method)) return '需要输入';
+  return method;
 }
 
 function decisionLabel(decision: unknown) {
@@ -1642,6 +1837,20 @@ function buildThreadNavigation(
   for (const project of groups) project.threads.sort(compareThreadRecency);
   recent.sort(compareThreadRecency);
   return { projects: groups, recent };
+}
+
+function filterThreadNavigation(navigation: ThreadNavigation, query: string): ThreadNavigation {
+  if (!query) return navigation;
+  const matches = (thread: CodexThreadSummary) =>
+    [thread.name, thread.preview, thread.cwd].some((value) => value?.toLocaleLowerCase().includes(query));
+  return {
+    projects: navigation.projects.flatMap((group) => {
+      if (group.name.toLocaleLowerCase().includes(query)) return [group];
+      const threads = group.threads.filter(matches);
+      return threads.length > 0 ? [{ ...group, threads }] : [];
+    }),
+    recent: navigation.recent.filter(matches),
+  };
 }
 
 function compareThreadRecency(left: CodexThreadSummary, right: CodexThreadSummary) {
@@ -2160,6 +2369,17 @@ function formatThreadTime(value?: number) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function formatRelativeTime(value?: number) {
+  if (!value) return undefined;
+  const milliseconds = value < 1_000_000_000_000 ? value * 1_000 : value;
+  const elapsedMinutes = Math.floor((Date.now() - milliseconds) / 60_000);
+  if (elapsedMinutes < 1) return '刚刚';
+  if (elapsedMinutes < 60) return `${elapsedMinutes} 分钟`;
+  if (elapsedMinutes < 24 * 60) return `${Math.floor(elapsedMinutes / 60)} 小时`;
+  if (elapsedMinutes < 7 * 24 * 60) return `${Math.floor(elapsedMinutes / (24 * 60))} 天`;
+  return new Date(milliseconds).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' });
 }
 
 interface PairingLink {

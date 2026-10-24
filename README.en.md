@@ -72,4 +72,4 @@ The shared URL must use `ws://127.0.0.1:<port>`. Project directories require exp
 
 Installing an update does not switch to shared mode automatically. Exit Desktop's windows and system tray before changing its launcher. See the [implementation record](docs/shared-session-implementation.md) for setup, rollback, tested versions, and remaining acceptance checks.
 
-[Development and local setup](docs/development.md) · [Architecture](docs/architecture.md) · [Security](docs/security.md) · [Changelog](CHANGELOG.md)
+[Development and local setup](docs/development.md) · [Architecture](docs/architecture.md) · [Remote control research (Chinese)](docs/remote-control-research.md) · [Security](docs/security.md) · [Changelog](CHANGELOG.md)
